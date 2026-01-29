@@ -4,8 +4,8 @@
 """Regression tests for Qwen3 TTS model wrapper.
 
 Tests cover:
-  - Profile run cap (regression for PR #1082 / #995)
-  - Flash-attn detection and fallback
+  - Profile run short-circuit (regression for PR #1082 / #995)
+  - SDPA attention fallback when flash-attn is unavailable
   - Code predictor regional compilation (Phase 1a)
 
 These tests mock heavy dependencies (vllm, transformers, librosa, etc.) so
@@ -245,29 +245,33 @@ def _make_structured_model_mock():
 
 
 # ---------------------------------------------------------------------------
-# Test A: Profile run cap (regression for PR #1082 / #995)
+# Test A: Profile run short-circuit (regression for PR #1082 / #995)
 # ---------------------------------------------------------------------------
 
-class TestProfileRunCap:
-    """Empty text caps max_new_tokens and proceeds to generation."""
+class TestProfileRunShortCircuit:
+    """Empty text triggers a dummy audio return instead of hanging."""
 
-    def test_empty_text_caps_max_new_tokens(self):
-        """Profile run sets max_new_tokens=2 and still calls generation."""
+    def test_empty_text_returns_dummy_audio(self):
         wrapper = _make_wrapper()
-        dummy_wav = np.zeros(24000, dtype=np.float32)
-        wrapper.model.generate_voice_clone.return_value = ([dummy_wav], 24000)
-
-        wrapper.forward(
-            runtime_additional_information=[{
-                "text": [""],
-                "task_type": ["Base"],
-                "language": ["Auto"],
-            }],
+        result = wrapper.forward(
+            runtime_additional_information=[{"text": [""]}],
         )
 
-        wrapper.model.generate_voice_clone.assert_called_once()
-        _, call_kwargs = wrapper.model.generate_voice_clone.call_args
-        assert call_kwargs.get("max_new_tokens") == 2
+        assert result.multimodal_outputs is not None
+        audio = result.multimodal_outputs["model_outputs"]
+        assert audio.shape == (24000,)
+        assert result.multimodal_outputs["sr"].item() == 24000
+
+    def test_empty_text_skips_generation(self):
+        wrapper = _make_wrapper()
+        wrapper.forward(
+            runtime_additional_information=[{"text": [""]}],
+        )
+
+        model = wrapper.model
+        model.generate_voice_clone.assert_not_called()
+        model.generate_custom_voice.assert_not_called()
+        model.generate_voice_design.assert_not_called()
 
     def test_nonempty_text_proceeds_to_generation(self):
         wrapper = _make_wrapper()
@@ -284,33 +288,16 @@ class TestProfileRunCap:
 
         wrapper.model.generate_voice_clone.assert_called_once()
 
-    def test_nonempty_text_does_not_cap_max_new_tokens(self):
-        """Non-profile runs should not inject max_new_tokens=2."""
-        wrapper = _make_wrapper()
-        dummy_wav = np.zeros(24000, dtype=np.float32)
-        wrapper.model.generate_voice_clone.return_value = ([dummy_wav], 24000)
-
-        wrapper.forward(
-            runtime_additional_information=[{
-                "text": ["Hello world"],
-                "task_type": ["Base"],
-                "language": ["Auto"],
-            }],
-        )
-
-        _, call_kwargs = wrapper.model.generate_voice_clone.call_args
-        assert call_kwargs.get("max_new_tokens") != 2
-
 
 # ---------------------------------------------------------------------------
-# Test B: Flash-attn detection
+# Test B: SDPA attention fallback
 # ---------------------------------------------------------------------------
 
-class TestFlashAttnDetection:
+class TestSDPAFallback:
     """Verify attn_implementation kwarg passed to Qwen3TTSModel.from_pretrained."""
 
-    def test_no_attn_kwarg_without_flash_attn(self):
-        """When flash_attn is not importable, from_pretrained gets no attn_implementation."""
+    def test_sdpa_fallback_without_flash_attn(self):
+        """When flash_attn is not importable, from_pretrained receives sdpa."""
         saved = sys.modules.pop("flash_attn", None)
         try:
             real_import = _builtins_import()
@@ -330,8 +317,8 @@ class TestFlashAttnDetection:
 
                 mock_fp.assert_called_once()
                 _, call_kwargs = mock_fp.call_args
-                assert "attn_implementation" not in call_kwargs, \
-                    f"Expected no attn_implementation kwarg, got: {call_kwargs}"
+                assert call_kwargs.get("attn_implementation") == "sdpa", \
+                    f"Expected attn_implementation='sdpa', got: {call_kwargs}"
         finally:
             if saved is not None:
                 sys.modules["flash_attn"] = saved

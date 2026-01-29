@@ -73,8 +73,8 @@ class Qwen3TTSModelForGeneration(nn.Module):
 
             attn_kwargs = {"attn_implementation": "flash_attention_2"}
         except ImportError:
-            logger.warning("Flash-Attn is not installed. Using default PyTorch attention implementation.")
-            attn_kwargs = {}
+            logger.info("flash-attn not installed. Falling back to PyTorch SDPA attention.")
+            attn_kwargs = {"attn_implementation": "sdpa"}
 
         self.model = Qwen3TTSModel.from_pretrained(
             model_path,
@@ -145,12 +145,18 @@ class Qwen3TTSModelForGeneration(nn.Module):
                 runtime_additional_information[key] = value[0]
 
         # During profile/warmup runs, text is empty and no real inputs exist.
-        # Cap generation steps so the full pipeline executes (preserving
-        # KV-cache profiling behaviour) but exits quickly even if the model
-        # cannot converge from degenerate dummy inputs.
+        # Short-circuit to avoid degenerate generation that hangs on small
+        # models (e.g. 0.6B) due to corrupted dummy inputs.
         if not text:
-            logger.info("Profile run detected (empty text). Capping max_new_tokens to 2.")
-            runtime_additional_information["max_new_tokens"] = 2
+            logger.info("Profile run detected (empty text). Returning dummy audio output.")
+            dummy_audio = torch.zeros(24000, dtype=torch.float32)  # 1s silence at 24kHz
+            return OmniOutput(
+                text_hidden_states=None,
+                multimodal_outputs={
+                    "model_outputs": dummy_audio,
+                    "sr": torch.tensor(24000, dtype=torch.int),
+                },
+            )
 
         # Call the appropriate generation method based on task_type
         if task_type == "CustomVoice":
