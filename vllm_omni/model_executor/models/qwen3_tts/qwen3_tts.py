@@ -73,14 +73,33 @@ class Qwen3TTSModelForGeneration(nn.Module):
 
             attn_kwargs = {"attn_implementation": "flash_attention_2"}
         except ImportError:
-            logger.warning("Flash-Attn is not installed. Using default PyTorch attention implementation.")
-            attn_kwargs = {}
+            logger.info("flash-attn not installed. Falling back to PyTorch SDPA attention.")
+            attn_kwargs = {"attn_implementation": "sdpa"}
 
         self.model = Qwen3TTSModel.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
             **attn_kwargs,
         )
+
+        # Compile code predictor decoder layers for reduced kernel launch overhead.
+        # Uses dynamic=True (not mode="reduce-overhead") because the autoregressive
+        # generate() loop has variable KV cache / sequence length shapes per step.
+        enforce_eager = getattr(getattr(vllm_config, "model_config", None), "enforce_eager", False)
+        if not enforce_eager:
+            try:
+                from vllm_omni.diffusion.compile import regionally_compile
+            except ImportError:
+                logger.info("regionally_compile not available, skipping code predictor compilation.")
+            else:
+                code_predictor_model = self.model.model.talker.code_predictor.model
+                code_predictor_model._repeated_blocks = ["Qwen3TTSDecoderLayer"]
+                try:
+                    regionally_compile(code_predictor_model, dynamic=True)
+                    logger.info("Code predictor decoder layers compiled with torch.compile.")
+                except RuntimeError as e:
+                    logger.warning("Failed to compile code predictor layers: %s. Continuing without compilation.", e)
+
         self.task_type = model_path.split("-")[-1].strip("/")
         # Mark that this model produces multimodal outputs
         self.have_multimodal_outputs = True
@@ -124,6 +143,20 @@ class Qwen3TTSModelForGeneration(nn.Module):
         for key, value in runtime_additional_information.items():
             if isinstance(value, list) and len(value) > 0:
                 runtime_additional_information[key] = value[0]
+
+        # During profile/warmup runs, text is empty and no real inputs exist.
+        # Short-circuit to avoid degenerate generation that hangs on small
+        # models (e.g. 0.6B) due to corrupted dummy inputs.
+        if not text:
+            logger.info("Profile run detected (empty text). Returning dummy audio output.")
+            dummy_audio = torch.zeros(24000, dtype=torch.float32)  # 1s silence at 24kHz
+            return OmniOutput(
+                text_hidden_states=None,
+                multimodal_outputs={
+                    "model_outputs": dummy_audio,
+                    "sr": torch.tensor(24000, dtype=torch.int),
+                },
+            )
 
         # Call the appropriate generation method based on task_type
         if task_type == "CustomVoice":
