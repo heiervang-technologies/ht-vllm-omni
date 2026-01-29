@@ -125,6 +125,20 @@ class Qwen3TTSModelForGeneration(nn.Module):
             if isinstance(value, list) and len(value) > 0:
                 runtime_additional_information[key] = value[0]
 
+        # During profile/warmup runs, text is empty and no real inputs exist.
+        # Short-circuit to avoid degenerate generation that hangs on small
+        # models (e.g. 0.6B) due to corrupted dummy inputs.
+        if not text:
+            logger.info("Profile run detected (empty text). Returning dummy audio output.")
+            dummy_audio = torch.zeros(24000, dtype=torch.float32)  # 1s silence at 24kHz
+            return OmniOutput(
+                text_hidden_states=None,
+                multimodal_outputs={
+                    "model_outputs": dummy_audio,
+                    "sr": torch.tensor(24000, dtype=torch.int),
+                },
+            )
+
         # Call the appropriate generation method based on task_type
         if task_type == "CustomVoice":
             result = self.model.generate_custom_voice(
