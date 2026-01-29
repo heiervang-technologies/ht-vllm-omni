@@ -161,9 +161,13 @@ Qwen3TTSModel = _mod.Qwen3TTSModel
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_vllm_config(model_path: str = "Qwen/Qwen3-TTS-12Hz-0.6B-Base") -> MagicMock:
+def _make_vllm_config(
+    model_path: str = "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+    enforce_eager: bool = False,
+) -> MagicMock:
     cfg = MagicMock()
     cfg.model_config.model = model_path
+    cfg.model_config.enforce_eager = enforce_eager
     return cfg
 
 
@@ -286,49 +290,92 @@ class TestFlashAttnDetection:
 # Test C: Code predictor regional compilation (Phase 1a)
 # ---------------------------------------------------------------------------
 
+def _make_structured_model_mock():
+    """Build a mock with explicit attribute hierarchy matching the real model.
+
+    Real hierarchy:
+        Qwen3TTSModel (wrapper .model attr)
+          └── Qwen3TTSForConditionalGeneration (.model on wrapper)
+                └── .talker  (Qwen3TTSTalkerForConditionalGeneration)
+                      └── .code_predictor  (Qwen3TTSTalkerCodePredictorModelForConditionalGeneration)
+                            └── .model  (Qwen3TTSTalkerCodePredictorModel — has .layers)
+
+    Using a structured mock prevents MagicMock from auto-creating wrong paths
+    (e.g. .model.model.code_predictor.model without .talker).
+    """
+    cp_inner_model = MagicMock(name="Qwen3TTSTalkerCodePredictorModel")
+    code_predictor = MagicMock(name="CodePredictorForCG")
+    code_predictor.model = cp_inner_model
+
+    talker = MagicMock(name="TalkerForCG")
+    talker.code_predictor = code_predictor
+
+    hf_model = MagicMock(name="Qwen3TTSForConditionalGeneration")
+    hf_model.talker = talker
+    # Ensure accessing .code_predictor directly on hf_model raises,
+    # so tests would fail if the production code skips .talker
+    del hf_model.code_predictor
+
+    wrapper_model = MagicMock(name="Qwen3TTSModel")
+    wrapper_model.model = hf_model
+
+    return wrapper_model, cp_inner_model
+
+
 class TestCodePredictorCompilation:
     """Verify regionally_compile is called on the code predictor model."""
 
     def test_regionally_compile_called_on_init(self):
-        """regionally_compile is called with the code predictor model during __init__."""
+        """regionally_compile is called with the code predictor's inner model and dynamic=True."""
         _mock_regionally_compile.reset_mock()
 
         vllm_config = _make_vllm_config()
+        wrapper_model, cp_inner = _make_structured_model_mock()
         with patch.object(Qwen3TTSModel, "from_pretrained") as mock_fp:
-            mock_model = MagicMock()
-            mock_fp.return_value = mock_model
+            mock_fp.return_value = wrapper_model
             Qwen3TTSModelForGeneration(vllm_config=vllm_config)
 
         _mock_regionally_compile.assert_called_once()
         call_args, call_kwargs = _mock_regionally_compile.call_args
-        # First positional arg is the code predictor's inner model
-        assert call_args[0] is mock_model.model.code_predictor.model
-        assert call_kwargs.get("mode") == "reduce-overhead"
+        assert call_args[0] is cp_inner
+        assert call_kwargs.get("dynamic") is True
+        assert "mode" not in call_kwargs
 
     def test_repeated_blocks_set_before_compile(self):
         """_repeated_blocks attribute is set on the code predictor model."""
         _mock_regionally_compile.reset_mock()
 
         vllm_config = _make_vllm_config()
+        wrapper_model, cp_inner = _make_structured_model_mock()
         with patch.object(Qwen3TTSModel, "from_pretrained") as mock_fp:
-            mock_model = MagicMock()
-            mock_fp.return_value = mock_model
+            mock_fp.return_value = wrapper_model
             Qwen3TTSModelForGeneration(vllm_config=vllm_config)
 
-        cp_model = mock_model.model.code_predictor.model
-        assert cp_model._repeated_blocks == ["Qwen3TTSDecoderLayer"]
+        assert cp_inner._repeated_blocks == ["Qwen3TTSDecoderLayer"]
 
     def test_compile_failure_does_not_crash(self):
-        """If regionally_compile raises, __init__ still succeeds."""
+        """If regionally_compile raises RuntimeError, __init__ still succeeds."""
         _mock_regionally_compile.reset_mock()
         _mock_regionally_compile.side_effect = RuntimeError("compile failed")
 
         try:
             vllm_config = _make_vllm_config()
+            wrapper_model, _ = _make_structured_model_mock()
             with patch.object(Qwen3TTSModel, "from_pretrained") as mock_fp:
-                mock_fp.return_value = MagicMock()
-                # Should not raise
+                mock_fp.return_value = wrapper_model
                 wrapper = Qwen3TTSModelForGeneration(vllm_config=vllm_config)
                 assert wrapper is not None
         finally:
             _mock_regionally_compile.side_effect = None
+
+    def test_enforce_eager_skips_compilation(self):
+        """When enforce_eager=True, regionally_compile is not called."""
+        _mock_regionally_compile.reset_mock()
+
+        vllm_config = _make_vllm_config(enforce_eager=True)
+        wrapper_model, _ = _make_structured_model_mock()
+        with patch.object(Qwen3TTSModel, "from_pretrained") as mock_fp:
+            mock_fp.return_value = wrapper_model
+            Qwen3TTSModelForGeneration(vllm_config=vllm_config)
+
+        _mock_regionally_compile.assert_not_called()
