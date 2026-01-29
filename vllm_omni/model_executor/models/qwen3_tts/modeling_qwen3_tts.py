@@ -1629,7 +1629,9 @@ class Qwen3TTSTalkerForConditionalGeneration(Qwen3TTSTalkerTextPreTrainedModel, 
         # Generate
         else:
             last_id_hidden = self.get_input_embeddings()(input_ids)
-            logger.debug("Code predictor generate: use_cache=%s", self.code_predictor.config.use_cache)
+            if not getattr(self, "_logged_use_cache", False):
+                logger.debug("Code predictor generate: use_cache=%s", self.code_predictor.config.use_cache)
+                self._logged_use_cache = True
             predictor_result = self.code_predictor.generate(
                 inputs_embeds=torch.cat((past_hidden, last_id_hidden), dim=1),
                 max_new_tokens=self.config.num_code_groups - 1,

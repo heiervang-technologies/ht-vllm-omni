@@ -4,7 +4,7 @@
 """Regression tests for Qwen3 TTS model wrapper.
 
 Tests cover:
-  - Profile run short-circuit (regression for PR #1082)
+  - Profile run cap (regression for PR #1082 / #995)
   - Flash-attn detection and fallback
   - Code predictor regional compilation (Phase 1a)
 
@@ -15,6 +15,7 @@ The module under test is compiled and executed in a synthetic namespace
 to completely bypass the vllm_omni.__init__ import chain.
 """
 
+import atexit
 import logging
 import sys
 import types
@@ -23,6 +24,7 @@ from typing import NamedTuple
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 
 # ---------------------------------------------------------------------------
@@ -80,7 +82,7 @@ _mock_regionally_compile = MagicMock(name="regionally_compile")
 
 
 def _setup():
-    # Save originals so they can be restored if needed
+    # Save originals so they can be restored on teardown
     for fqn in _STUB_FQNS:
         _saved_modules[fqn] = sys.modules.get(fqn)
         _make_stub(fqn)
@@ -138,7 +140,18 @@ def _setup():
     sys.modules["transformers"].AutoProcessor = MagicMock()
 
 
+def _teardown():
+    """Restore sys.modules to pre-test state."""
+    for fqn in reversed(_STUB_FQNS):
+        orig = _saved_modules.get(fqn)
+        if orig is None:
+            sys.modules.pop(fqn, None)
+        else:
+            sys.modules[fqn] = orig
+
+
 _setup()
+atexit.register(_teardown)
 
 # Compile and exec the target file in a synthetic module, setting __package__
 # so that `from .foo import bar` resolves via sys.modules, not the file system.
@@ -155,6 +168,17 @@ exec(_code, _mod.__dict__)  # noqa: S102
 
 Qwen3TTSModelForGeneration = _mod.Qwen3TTSModelForGeneration
 Qwen3TTSModel = _mod.Qwen3TTSModel
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _reset_compile_mock():
+    """Reset the regionally_compile mock before each test."""
+    _mock_regionally_compile.reset_mock()
+    _mock_regionally_compile.side_effect = None
 
 
 # ---------------------------------------------------------------------------
@@ -188,34 +212,62 @@ def _builtins_import():
     return builtins.__import__
 
 
+def _make_structured_model_mock():
+    """Build a mock with explicit attribute hierarchy matching the real model.
+
+    Real hierarchy:
+        Qwen3TTSModel (wrapper .model attr)
+          +-- Qwen3TTSForConditionalGeneration (.model on wrapper)
+                +-- .talker  (Qwen3TTSTalkerForConditionalGeneration)
+                      +-- .code_predictor  (Qwen3TTSTalkerCodePredictorModelForConditionalGeneration)
+                            +-- .model  (Qwen3TTSTalkerCodePredictorModel -- has .layers)
+
+    Using a structured mock prevents MagicMock from auto-creating wrong paths
+    (e.g. .model.model.code_predictor.model without .talker).
+    """
+    cp_inner_model = MagicMock(name="Qwen3TTSTalkerCodePredictorModel")
+    code_predictor = MagicMock(name="CodePredictorForCG")
+    code_predictor.model = cp_inner_model
+
+    talker = MagicMock(name="TalkerForCG")
+    talker.code_predictor = code_predictor
+
+    hf_model = MagicMock(name="Qwen3TTSForConditionalGeneration")
+    hf_model.talker = talker
+    # Ensure accessing .code_predictor directly on hf_model raises,
+    # so tests would fail if the production code skips .talker
+    del hf_model.code_predictor
+
+    wrapper_model = MagicMock(name="Qwen3TTSModel")
+    wrapper_model.model = hf_model
+
+    return wrapper_model, cp_inner_model
+
+
 # ---------------------------------------------------------------------------
-# Test A: Profile run short-circuit (regression for PR #1082)
+# Test A: Profile run cap (regression for PR #1082 / #995)
 # ---------------------------------------------------------------------------
 
-class TestProfileRunShortCircuit:
-    """Empty text triggers a dummy audio return instead of hanging."""
+class TestProfileRunCap:
+    """Empty text caps max_new_tokens and proceeds to generation."""
 
-    def test_empty_text_returns_dummy_audio(self):
+    def test_empty_text_caps_max_new_tokens(self):
+        """Profile run sets max_new_tokens=2 and still calls generation."""
         wrapper = _make_wrapper()
-        result = wrapper.forward(
-            runtime_additional_information=[{"text": [""]}],
-        )
+        dummy_wav = np.zeros(24000, dtype=np.float32)
+        wrapper.model.generate_voice_clone.return_value = ([dummy_wav], 24000)
 
-        assert result.multimodal_outputs is not None
-        audio = result.multimodal_outputs["model_outputs"]
-        assert audio.shape == (24000,)
-        assert result.multimodal_outputs["sr"].item() == 24000
-
-    def test_empty_text_skips_generation(self):
-        wrapper = _make_wrapper()
         wrapper.forward(
-            runtime_additional_information=[{"text": [""]}],
+            runtime_additional_information=[{
+                "text": [""],
+                "task_type": ["Base"],
+                "language": ["Auto"],
+            }],
         )
 
-        model = wrapper.model
-        model.generate_voice_clone.assert_not_called()
-        model.generate_custom_voice.assert_not_called()
-        model.generate_voice_design.assert_not_called()
+        wrapper.model.generate_voice_clone.assert_called_once()
+        _, call_kwargs = wrapper.model.generate_voice_clone.call_args
+        assert call_kwargs.get("max_new_tokens") == 2
 
     def test_nonempty_text_proceeds_to_generation(self):
         wrapper = _make_wrapper()
@@ -231,6 +283,23 @@ class TestProfileRunShortCircuit:
         )
 
         wrapper.model.generate_voice_clone.assert_called_once()
+
+    def test_nonempty_text_does_not_cap_max_new_tokens(self):
+        """Non-profile runs should not inject max_new_tokens=2."""
+        wrapper = _make_wrapper()
+        dummy_wav = np.zeros(24000, dtype=np.float32)
+        wrapper.model.generate_voice_clone.return_value = ([dummy_wav], 24000)
+
+        wrapper.forward(
+            runtime_additional_information=[{
+                "text": ["Hello world"],
+                "task_type": ["Base"],
+                "language": ["Auto"],
+            }],
+        )
+
+        _, call_kwargs = wrapper.model.generate_voice_clone.call_args
+        assert call_kwargs.get("max_new_tokens") != 2
 
 
 # ---------------------------------------------------------------------------
@@ -290,45 +359,11 @@ class TestFlashAttnDetection:
 # Test C: Code predictor regional compilation (Phase 1a)
 # ---------------------------------------------------------------------------
 
-def _make_structured_model_mock():
-    """Build a mock with explicit attribute hierarchy matching the real model.
-
-    Real hierarchy:
-        Qwen3TTSModel (wrapper .model attr)
-          └── Qwen3TTSForConditionalGeneration (.model on wrapper)
-                └── .talker  (Qwen3TTSTalkerForConditionalGeneration)
-                      └── .code_predictor  (Qwen3TTSTalkerCodePredictorModelForConditionalGeneration)
-                            └── .model  (Qwen3TTSTalkerCodePredictorModel — has .layers)
-
-    Using a structured mock prevents MagicMock from auto-creating wrong paths
-    (e.g. .model.model.code_predictor.model without .talker).
-    """
-    cp_inner_model = MagicMock(name="Qwen3TTSTalkerCodePredictorModel")
-    code_predictor = MagicMock(name="CodePredictorForCG")
-    code_predictor.model = cp_inner_model
-
-    talker = MagicMock(name="TalkerForCG")
-    talker.code_predictor = code_predictor
-
-    hf_model = MagicMock(name="Qwen3TTSForConditionalGeneration")
-    hf_model.talker = talker
-    # Ensure accessing .code_predictor directly on hf_model raises,
-    # so tests would fail if the production code skips .talker
-    del hf_model.code_predictor
-
-    wrapper_model = MagicMock(name="Qwen3TTSModel")
-    wrapper_model.model = hf_model
-
-    return wrapper_model, cp_inner_model
-
-
 class TestCodePredictorCompilation:
     """Verify regionally_compile is called on the code predictor model."""
 
     def test_regionally_compile_called_on_init(self):
         """regionally_compile is called with the code predictor's inner model and dynamic=True."""
-        _mock_regionally_compile.reset_mock()
-
         vllm_config = _make_vllm_config()
         wrapper_model, cp_inner = _make_structured_model_mock()
         with patch.object(Qwen3TTSModel, "from_pretrained") as mock_fp:
@@ -343,8 +378,6 @@ class TestCodePredictorCompilation:
 
     def test_repeated_blocks_set_before_compile(self):
         """_repeated_blocks attribute is set on the code predictor model."""
-        _mock_regionally_compile.reset_mock()
-
         vllm_config = _make_vllm_config()
         wrapper_model, cp_inner = _make_structured_model_mock()
         with patch.object(Qwen3TTSModel, "from_pretrained") as mock_fp:
@@ -355,23 +388,17 @@ class TestCodePredictorCompilation:
 
     def test_compile_failure_does_not_crash(self):
         """If regionally_compile raises RuntimeError, __init__ still succeeds."""
-        _mock_regionally_compile.reset_mock()
         _mock_regionally_compile.side_effect = RuntimeError("compile failed")
 
-        try:
-            vllm_config = _make_vllm_config()
-            wrapper_model, _ = _make_structured_model_mock()
-            with patch.object(Qwen3TTSModel, "from_pretrained") as mock_fp:
-                mock_fp.return_value = wrapper_model
-                wrapper = Qwen3TTSModelForGeneration(vllm_config=vllm_config)
-                assert wrapper is not None
-        finally:
-            _mock_regionally_compile.side_effect = None
+        vllm_config = _make_vllm_config()
+        wrapper_model, _ = _make_structured_model_mock()
+        with patch.object(Qwen3TTSModel, "from_pretrained") as mock_fp:
+            mock_fp.return_value = wrapper_model
+            wrapper = Qwen3TTSModelForGeneration(vllm_config=vllm_config)
+            assert wrapper is not None
 
     def test_enforce_eager_skips_compilation(self):
         """When enforce_eager=True, regionally_compile is not called."""
-        _mock_regionally_compile.reset_mock()
-
         vllm_config = _make_vllm_config(enforce_eager=True)
         wrapper_model, _ = _make_structured_model_mock()
         with patch.object(Qwen3TTSModel, "from_pretrained") as mock_fp:
