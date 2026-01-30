@@ -21,6 +21,10 @@ class OpenAICreateSpeechRequest(BaseModel):
         ge=0.25,
         le=4.0,
     )
+    stream: bool = Field(
+        default=False,
+        description="Enable streaming audio output. Audio is returned in chunks via chunked transfer encoding.",
+    )
     stream_format: Literal["sse", "audio"] | None = "audio"
 
     # Qwen3-TTS specific parameters

@@ -1,8 +1,11 @@
 import asyncio
+import struct
+from io import BytesIO
 from typing import Any
 
+import numpy as np
 from fastapi import Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
@@ -184,7 +187,10 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         - ref_text: Transcript of reference audio (Base task)
         - x_vector_only_mode: Use speaker embedding only (Base task)
 
-        NOTE: Streaming audio generation is not currently supported.
+        When ``stream=True``, audio is returned via chunked transfer encoding.
+        The complete audio is generated first, then streamed in PCM chunks.
+        For WAV format, a valid WAV header is sent first followed by raw PCM data.
+        For PCM format, raw 16-bit signed PCM samples are streamed directly.
         """
 
         error_check_ret = await self._check_model(request)
@@ -217,10 +223,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 prompt = {"prompt": request.input}
 
             logger.info(
-                "TTS speech request %s: text=%r, task_type=%s",
+                "TTS speech request %s: text=%r, task_type=%s, stream=%s",
                 request_id,
                 request.input[:50] + "..." if len(request.input) > 50 else request.input,
                 tts_params.get("task_type", ["unknown"])[0],
+                request.stream,
             )
 
             sampling_params_list = self.engine_client.default_sampling_params_list
@@ -240,21 +247,15 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 return self.create_error_response("No output generated from the model.")
 
             # Extract audio from output
-            # Audio can be in final_output.multimodal_output or final_output.request_output.multimodal_output
-            audio_output = None
-            if hasattr(final_output, "multimodal_output") and final_output.multimodal_output:
-                audio_output = final_output.multimodal_output
-            if (not audio_output or "audio" not in audio_output) and hasattr(final_output, "request_output"):
-                if final_output.request_output and hasattr(final_output.request_output, "multimodal_output"):
-                    audio_output = final_output.request_output.multimodal_output
-
-            if not audio_output or "audio" not in audio_output:
+            audio_output = self._extract_audio_output(final_output)
+            if audio_output is None:
                 return self.create_error_response("TTS model did not produce audio output.")
 
             audio_tensor = audio_output["audio"]
             sample_rate = audio_output.get("sr", 24000)
             if hasattr(sample_rate, "item"):
                 sample_rate = sample_rate.item()
+            sample_rate = int(sample_rate)
 
             # Convert tensor to numpy
             if hasattr(audio_tensor, "float"):
@@ -264,16 +265,42 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             if audio_tensor.ndim > 1:
                 audio_tensor = audio_tensor.squeeze()
 
+            # Apply speed adjustment if needed
+            speed = request.speed or 1.0
+            if speed != 1.0:
+                audio_obj = CreateAudio(
+                    audio_tensor=audio_tensor,
+                    sample_rate=sample_rate,
+                    response_format=request.response_format or "wav",
+                    speed=speed,
+                    stream_format=request.stream_format,
+                    base64_encode=False,
+                )
+                audio_response: AudioResponse = self.create_audio(audio_obj)
+                if request.stream:
+                    return StreamingResponse(
+                        self._stream_audio_bytes(audio_response.audio_data),
+                        media_type=audio_response.media_type,
+                    )
+                return Response(content=audio_response.audio_data, media_type=audio_response.media_type)
+
+            if request.stream:
+                response_format = (request.response_format or "wav").lower()
+                return StreamingResponse(
+                    self._stream_pcm_audio(audio_tensor, sample_rate, response_format),
+                    media_type=_STREAM_MEDIA_TYPES.get(response_format, "audio/wav"),
+                )
+
             audio_obj = CreateAudio(
                 audio_tensor=audio_tensor,
-                sample_rate=int(sample_rate),
+                sample_rate=sample_rate,
                 response_format=request.response_format or "wav",
-                speed=request.speed or 1.0,
+                speed=1.0,
                 stream_format=request.stream_format,
                 base64_encode=False,
             )
 
-            audio_response: AudioResponse = self.create_audio(audio_obj)
+            audio_response = self.create_audio(audio_obj)
             return Response(content=audio_response.audio_data, media_type=audio_response.media_type)
 
         except asyncio.CancelledError:
@@ -283,3 +310,83 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         except Exception as e:
             logger.exception("Speech generation failed: %s", e)
             return self.create_error_response(f"Speech generation failed: {e}")
+
+    @staticmethod
+    def _extract_audio_output(output: OmniRequestOutput) -> dict | None:
+        """Extract audio dict from OmniRequestOutput, trying both locations."""
+        audio_output = None
+        if hasattr(output, "multimodal_output") and output.multimodal_output:
+            audio_output = output.multimodal_output
+        if (not audio_output or "audio" not in audio_output) and hasattr(output, "request_output"):
+            if output.request_output and hasattr(output.request_output, "multimodal_output"):
+                audio_output = output.request_output.multimodal_output
+        if audio_output and "audio" in audio_output:
+            return audio_output
+        return None
+
+    @staticmethod
+    async def _stream_audio_bytes(data: bytes, chunk_size: int = 16384):
+        """Yield pre-encoded audio bytes in fixed-size chunks."""
+        offset = 0
+        while offset < len(data):
+            yield data[offset : offset + chunk_size]
+            offset += chunk_size
+
+    @staticmethod
+    async def _stream_pcm_audio(
+        audio: np.ndarray,
+        sample_rate: int,
+        response_format: str,
+        chunk_duration_ms: int = 500,
+    ):
+        """Stream audio as chunked PCM data.
+
+        For WAV format: yields a complete WAV header first, then raw PCM chunks.
+        For PCM format: yields raw 16-bit signed PCM chunks directly.
+        """
+        # Convert float audio to int16 PCM
+        audio_float = audio.astype(np.float32)
+        audio_float = np.clip(audio_float, -1.0, 1.0)
+        pcm_data = (audio_float * 32767).astype(np.int16).tobytes()
+
+        samples_per_chunk = int(sample_rate * chunk_duration_ms / 1000)
+        bytes_per_chunk = samples_per_chunk * 2  # 16-bit = 2 bytes per sample
+
+        if response_format == "wav":
+            # Write a complete WAV header with known data size
+            yield _make_wav_header(sample_rate, len(pcm_data))
+
+        # Stream PCM data in chunks
+        offset = 0
+        while offset < len(pcm_data):
+            yield pcm_data[offset : offset + bytes_per_chunk]
+            offset += bytes_per_chunk
+
+
+_STREAM_MEDIA_TYPES = {
+    "wav": "audio/wav",
+    "pcm": "audio/pcm",
+}
+
+
+def _make_wav_header(sample_rate: int, data_size: int, num_channels: int = 1, bits_per_sample: int = 16) -> bytes:
+    """Build a standard WAV (RIFF) header for PCM data."""
+    byte_rate = sample_rate * num_channels * bits_per_sample // 8
+    block_align = num_channels * bits_per_sample // 8
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,         # file size - 8
+        b"WAVE",
+        b"fmt ",
+        16,                     # fmt chunk size
+        1,                      # PCM format
+        num_channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data",
+        data_size,
+    )
+    return header
