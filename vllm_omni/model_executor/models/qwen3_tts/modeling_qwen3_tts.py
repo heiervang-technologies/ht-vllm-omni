@@ -1115,6 +1115,48 @@ class Qwen3TTSTalkerCodePredictorModel(Qwen3TTSPreTrainedModel):
         )
 
 
+def _sample_token(
+    logits: torch.Tensor,
+    do_sample: bool,
+    top_p: float,
+    top_k: int,
+    temperature: float,
+) -> torch.Tensor:
+    """Sample a token from logits with top-k/top-p/temperature.
+
+    Args:
+        logits: [B, vocab_size] unnormalized logits.
+        do_sample: If False, return greedy argmax.
+        top_p: Nucleus sampling threshold (1.0 = disabled).
+        top_k: Top-k filtering value (0 = disabled).
+        temperature: Sampling temperature (1.0 = no scaling).
+
+    Returns:
+        Token IDs of shape [B, 1].
+    """
+    if not do_sample:
+        return logits.argmax(dim=-1, keepdim=True)
+
+    if temperature != 1.0 and temperature > 0:
+        logits = logits / temperature
+
+    if top_k > 0:
+        top_k = min(top_k, logits.size(-1))
+        threshold = torch.topk(logits, top_k)[0][..., -1:]
+        logits = logits.masked_fill(logits < threshold, float("-inf"))
+
+    if 0.0 < top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+        # Keep tokens whose cumulative probability (before this token) < top_p
+        sorted_mask = (cumulative_probs - sorted_logits.softmax(dim=-1)) >= top_p
+        indices_to_remove = sorted_mask.scatter(-1, sorted_indices, sorted_mask)
+        logits = logits.masked_fill(indices_to_remove, float("-inf"))
+
+    probs = logits.softmax(dim=-1)
+    return torch.multinomial(probs, num_samples=1)
+
+
 class Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
@@ -1274,6 +1316,96 @@ class Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(Qwen3TTSPreTraine
         )
         model_kwargs["generation_steps"] = outputs.generation_steps
         return model_kwargs
+
+    def generate_codes(
+        self,
+        inputs_embeds: torch.Tensor,
+        do_sample: bool | None = True,
+        top_p: float | None = 1.0,
+        top_k: int | None = 50,
+        temperature: float | None = 0.9,
+    ) -> torch.Tensor:
+        """Generate codebook tokens with an explicit KV-cached loop.
+
+        Replaces ``self.generate()`` (HF ``GenerationMixin``) with a manual
+        prefill + decode loop that manages a ``DynamicCache`` directly.  This
+        eliminates per-step framework overhead (logits processors, stopping
+        criteria, model-kwargs bookkeeping) and is a prerequisite for future
+        CUDA-graph capture of the code-predictor inner loop.
+
+        The output is functionally equivalent to::
+
+            result = self.generate(
+                inputs_embeds=inputs_embeds,
+                max_new_tokens=num_code_groups - 1,
+                do_sample=do_sample, top_p=top_p,
+                top_k=top_k, temperature=temperature,
+                output_hidden_states=True,
+                return_dict_in_generate=True,
+            )
+            return result.sequences          # shape [B, num_code_groups - 1]
+
+        Args:
+            inputs_embeds: ``[B, 2, H]`` – talker hidden state concatenated
+                with the first-codebook embedding.
+            do_sample: Use sampling (``True``) or greedy argmax (``False``).
+            top_p: Nucleus-sampling threshold (1.0 disables).
+            top_k: Top-k filtering (0 disables).
+            temperature: Softmax temperature (1.0 = no scaling).
+
+        Returns:
+            ``torch.Tensor`` of shape ``[B, num_code_groups - 1]`` containing
+            the generated codebook token IDs (codebooks 2 … N).
+        """
+        # -- defaults for None-valued kwargs --------------------------------
+        if do_sample is None:
+            do_sample = True
+        if top_p is None:
+            top_p = 1.0
+        if top_k is None:
+            top_k = 50
+        if temperature is None:
+            temperature = 0.9
+
+        num_codes = self.config.num_code_groups - 1  # 31 for the 32-codebook model
+
+        # -- project prefill embeddings -------------------------------------
+        projected = self.small_to_mtp_projection(inputs_embeds)
+
+        # -- create KV cache ------------------------------------------------
+        cache = DynamicCache()
+
+        # -- prefill: run both input tokens through the transformer ---------
+        outputs = self.model(
+            inputs_embeds=projected,
+            past_key_values=cache,
+            use_cache=True,
+        )
+
+        # First codebook token (codebook 2) via lm_head[0]
+        logits = self.lm_head[0](outputs.last_hidden_state[:, -1:, :]).squeeze(1)
+        token = _sample_token(logits, do_sample, top_p, top_k, temperature)
+        sequences = [token]
+
+        # -- autoregressive decode for codebooks 3 … N ----------------------
+        for step in range(1, num_codes):
+            # Embed previous token with the step-specific embedding layer
+            embeds = self.model.codec_embedding[step - 1](token)
+            projected = self.small_to_mtp_projection(embeds)
+
+            # Single-token decode with KV cache
+            outputs = self.model(
+                inputs_embeds=projected,
+                past_key_values=cache,
+                use_cache=True,
+            )
+
+            logits = self.lm_head[step](outputs.last_hidden_state[:, -1:, :]).squeeze(1)
+            token = _sample_token(logits, do_sample, top_p, top_k, temperature)
+            sequences.append(token)
+
+        # [B, 1] × num_codes  →  [B, num_codes]
+        return torch.cat(sequences, dim=-1)
 
 
 @dataclass
@@ -1629,24 +1761,18 @@ class Qwen3TTSTalkerForConditionalGeneration(Qwen3TTSTalkerTextPreTrainedModel, 
         # Generate
         else:
             last_id_hidden = self.get_input_embeddings()(input_ids)
-            if not getattr(self, "_logged_use_cache", False):
-                logger.debug("Code predictor generate: use_cache=%s", self.code_predictor.config.use_cache)
-                self._logged_use_cache = True
-            predictor_result = self.code_predictor.generate(
+            predicted_codes = self.code_predictor.generate_codes(
                 inputs_embeds=torch.cat((past_hidden, last_id_hidden), dim=1),
-                max_new_tokens=self.config.num_code_groups - 1,
                 do_sample=subtalker_dosample,
                 top_p=subtalker_top_p,
                 top_k=subtalker_top_k,
                 temperature=subtalker_temperature,
-                output_hidden_states=True,
-                return_dict_in_generate=True,
             )
-            codec_ids = torch.cat((input_ids, predictor_result.sequences), dim=-1)
+            codec_ids = torch.cat((input_ids, predicted_codes), dim=-1)
             codec_hiddens = torch.cat(
                 [last_id_hidden]
                 + [
-                    self.code_predictor.get_input_embeddings()[i](predictor_result.sequences[..., i : i + 1])
+                    self.code_predictor.get_input_embeddings()[i](predicted_codes[..., i : i + 1])
                     for i in range(self.config.num_code_groups - 1)
                 ],
                 dim=1,
