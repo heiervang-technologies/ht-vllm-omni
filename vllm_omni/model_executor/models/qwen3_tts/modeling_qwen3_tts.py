@@ -1320,10 +1320,10 @@ class Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(Qwen3TTSPreTraine
     def generate_codes(
         self,
         inputs_embeds: torch.Tensor,
-        do_sample: bool | None = True,
-        top_p: float | None = 1.0,
-        top_k: int | None = 50,
-        temperature: float | None = 0.9,
+        do_sample: bool,
+        top_p: float,
+        top_k: int,
+        temperature: float,
     ) -> torch.Tensor:
         """Generate codebook tokens with an explicit KV-cached loop.
 
@@ -1357,16 +1357,6 @@ class Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(Qwen3TTSPreTraine
             ``torch.Tensor`` of shape ``[B, num_code_groups - 1]`` containing
             the generated codebook token IDs (codebooks 2 … N).
         """
-        # -- defaults for None-valued kwargs --------------------------------
-        if do_sample is None:
-            do_sample = True
-        if top_p is None:
-            top_p = 1.0
-        if top_k is None:
-            top_k = 50
-        if temperature is None:
-            temperature = 0.9
-
         num_codes = self.config.num_code_groups - 1  # 31 for the 32-codebook model
 
         # -- project prefill embeddings -------------------------------------
