@@ -239,34 +239,25 @@ class TestSampleToken:
 class TestGenerateCodes:
     """Functional tests for generate_codes()."""
 
+    # Canonical greedy kwargs — all sampling params are required (no defaults).
+    _GREEDY = dict(do_sample=False, top_p=1.0, top_k=0, temperature=1.0)
+
     def test_output_shape(self, code_predictor, prefill_embeds):
         with torch.no_grad():
-            result = code_predictor.generate_codes(prefill_embeds, do_sample=False)
+            result = code_predictor.generate_codes(prefill_embeds, **self._GREEDY)
         expected_codes = _CODE_GROUPS - 1  # 3
         assert result.shape == (1, expected_codes)
 
     def test_greedy_deterministic(self, code_predictor, prefill_embeds):
         """Greedy decoding should produce identical results across calls."""
         with torch.no_grad():
-            r1 = code_predictor.generate_codes(prefill_embeds, do_sample=False)
-            r2 = code_predictor.generate_codes(prefill_embeds, do_sample=False)
+            r1 = code_predictor.generate_codes(prefill_embeds, **self._GREEDY)
+            r2 = code_predictor.generate_codes(prefill_embeds, **self._GREEDY)
         assert torch.equal(r1, r2)
-
-    def test_none_kwargs_use_defaults(self, code_predictor, prefill_embeds):
-        """Passing None for sampling kwargs should not raise."""
-        with torch.no_grad():
-            result = code_predictor.generate_codes(
-                prefill_embeds,
-                do_sample=None,
-                top_p=None,
-                top_k=None,
-                temperature=None,
-            )
-        assert result.shape == (1, _CODE_GROUPS - 1)
 
     def test_valid_token_range(self, code_predictor, prefill_embeds):
         with torch.no_grad():
-            result = code_predictor.generate_codes(prefill_embeds, do_sample=False)
+            result = code_predictor.generate_codes(prefill_embeds, **self._GREEDY)
         assert (result >= 0).all()
         assert (result < _VOCAB).all()
 
@@ -275,7 +266,7 @@ class TestGenerateCodes:
         torch.manual_seed(42)
         embeds = torch.randn(3, 2, _HIDDEN)
         with torch.no_grad():
-            result = code_predictor.generate_codes(embeds, do_sample=False)
+            result = code_predictor.generate_codes(embeds, **self._GREEDY)
         assert result.shape == (3, _CODE_GROUPS - 1)
 
 
@@ -286,11 +277,15 @@ class TestGenerateCodes:
 class TestGenerateCodesRegression:
     """Verify generate_codes() produces identical output to HF generate()."""
 
+    _GREEDY = dict(do_sample=False, top_p=1.0, top_k=0, temperature=1.0)
+
     def test_greedy_matches_hf_generate(self, code_predictor, prefill_embeds):
         """Under greedy decoding, generate_codes() must match HF generate()."""
         with torch.no_grad():
             # New path: our manual loop
-            new_result = code_predictor.generate_codes(prefill_embeds, do_sample=False)
+            new_result = code_predictor.generate_codes(
+                prefill_embeds, **self._GREEDY,
+            )
 
             # Old path: HF GenerationMixin.generate()
             hf_result = code_predictor.generate(
@@ -320,7 +315,9 @@ class TestGenerateCodesRegression:
             embeds = torch.randn(1, 2, _HIDDEN)
 
             with torch.no_grad():
-                new_result = code_predictor.generate_codes(embeds, do_sample=False)
+                new_result = code_predictor.generate_codes(
+                    embeds, **self._GREEDY,
+                )
 
                 hf_result = code_predictor.generate(
                     inputs_embeds=embeds,
