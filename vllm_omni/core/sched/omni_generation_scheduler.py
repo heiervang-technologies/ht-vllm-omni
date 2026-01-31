@@ -315,9 +315,18 @@ class OmniGenerationScheduler(VLLMScheduler):
             if pooler_outputs:
                 pooler_output = pooler_outputs[req_index]
 
-            # Diffusion request: completes in one step; mark finished and free resources
+            # For streaming TTS, is_final=False means more chunks are coming.
+            # Only finish the request when is_final=True (default).
+            is_final = True
+            if pooler_output and isinstance(pooler_output, dict):
+                is_final = pooler_output.get("is_final", True)
+
+            # Diffusion request: completes in one step; mark finished and free resources.
+            # Streaming requests stay alive until is_final=True.
             if request.status == RequestStatus.FINISHED_STOPPED or (
-                self.omni_connector is None and request.num_computed_tokens >= request.num_prompt_tokens
+                self.omni_connector is None
+                and request.num_computed_tokens >= request.num_prompt_tokens
+                and is_final
             ):
                 request.status = RequestStatus.FINISHED_STOPPED
                 # Optional: set a stop_reason for front-end clarity

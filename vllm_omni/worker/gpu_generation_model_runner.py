@@ -249,6 +249,9 @@ class GPUGenerationModelRunner(OmniGPUModelRunner):
             )
 
         _, multimodal_outputs = self.extract_multimodal_outputs(outputs)
+        # Propagate is_final from OmniOutput for streaming TTS
+        if hasattr(outputs, "is_final") and isinstance(multimodal_outputs, dict):
+            multimodal_outputs["is_final"] = outputs.is_final
         self.execute_model_state = ExecuteModelState(
             scheduler_output,
             None,
@@ -325,6 +328,9 @@ class GPUGenerationModelRunner(OmniGPUModelRunner):
             for key, out in multimodal_outputs.items():
                 if out is not None and isinstance(out, torch.Tensor):
                     mm_payload[key] = out.detach().to("cpu").contiguous()
+                elif not isinstance(out, torch.Tensor):
+                    # Pass through non-tensor values (e.g., is_final bool)
+                    mm_payload[key] = out
             pooler_output.append(mm_payload)
         else:
             raise RuntimeError("Unsupported diffusion output type")
@@ -373,12 +379,16 @@ class GPUGenerationModelRunner(OmniGPUModelRunner):
             Audio waveforms: [batch, 1, waveform_len] or list of tensors
         """
         # Keep inputs identical to AR runner
+        # Pass request_id so models with per-request state (e.g. streaming TTS)
+        # can track generators across forward() calls.
+        request_id = self.input_batch.req_ids[0] if self.input_batch.num_reqs > 0 else None
         kwargs = dict(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
             **model_kwargs,
+            request_id=request_id,
             sampling_metadata=self.input_batch.sampling_metadata,
             logits_index=logits_indices,
             sampler=self.sampler,
