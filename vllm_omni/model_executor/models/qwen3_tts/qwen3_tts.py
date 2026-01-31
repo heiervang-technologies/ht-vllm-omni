@@ -266,13 +266,13 @@ class Qwen3TTSModelForGeneration(nn.Module):
 
             # Convert to tensor for OmniOutput
             if isinstance(wavs, np.ndarray):
-                audio_tensor = torch.from_numpy(wavs).float()
+                audio_tensor = torch.from_numpy(wavs.copy()).float()
             elif isinstance(wavs, list) and len(wavs) > 0:
                 audio_data = wavs[0]
                 if isinstance(audio_data, np.ndarray):
-                    audio_tensor = torch.from_numpy(audio_data).float()
+                    audio_tensor = torch.from_numpy(audio_data.copy()).float()
                 elif isinstance(audio_data, torch.Tensor):
-                    audio_tensor = audio_data.float()
+                    audio_tensor = audio_data.float().clone()
                 else:
                     audio_tensor = torch.tensor(audio_data, dtype=torch.float32)
                 fs = fs if not isinstance(fs, torch.Tensor) else fs.item()
@@ -280,6 +280,13 @@ class Qwen3TTSModelForGeneration(nn.Module):
                 # Empty audio chunk
                 audio_tensor = torch.zeros(1, dtype=torch.float32)
                 fs = sample_rate
+
+            # Guarantee 1-D contiguous layout for ZMQ serialization.
+            # numpy views / speech tokenizer expand() can produce stride-0
+            # tensors that .contiguous() won't fix. clone() forces a copy.
+            if audio_tensor.numel() == 0:
+                audio_tensor = torch.zeros(1, dtype=torch.float32)
+            audio_tensor = audio_tensor.detach().cpu().contiguous()
 
             if is_final:
                 self._cleanup_streaming(request_id)
@@ -331,6 +338,8 @@ class Qwen3TTSModelForGeneration(nn.Module):
                     audio_tensor = torch.from_numpy(audio_tensor).float()
                 elif not isinstance(audio_tensor, torch.Tensor):
                     audio_tensor = torch.tensor(audio_tensor, dtype=torch.float32)
+                # Ensure contiguous for ZMQ serialization
+                audio_tensor = audio_tensor.contiguous()
                 return OmniOutput(
                     text_hidden_states=None,
                     multimodal_outputs={"model_outputs": audio_tensor, "sr": torch.tensor(sr, dtype=torch.int)},
