@@ -249,9 +249,6 @@ class GPUGenerationModelRunner(OmniGPUModelRunner):
             )
 
         _, multimodal_outputs = self.extract_multimodal_outputs(outputs)
-        # Propagate is_final from OmniOutput for streaming TTS
-        if hasattr(outputs, "is_final") and isinstance(multimodal_outputs, dict):
-            multimodal_outputs["is_final"] = outputs.is_final
         self.execute_model_state = ExecuteModelState(
             scheduler_output,
             None,

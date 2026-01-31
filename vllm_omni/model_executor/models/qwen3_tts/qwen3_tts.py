@@ -173,6 +173,11 @@ class Qwen3TTSModelForGeneration(nn.Module):
 
         # ---- Streaming path: advance or create per-request generator ----
         if streaming and request_id:
+            # Remove keys already extracted to avoid duplicate keyword args
+            streaming_kwargs = {
+                k: v for k, v in kwargs.items()
+                if k not in ("request_id", "runtime_additional_information")
+            }
             return self._forward_streaming(
                 request_id=request_id,
                 text=text,
@@ -181,7 +186,7 @@ class Qwen3TTSModelForGeneration(nn.Module):
                 language=language,
                 instruct=instruct,
                 runtime_additional_information=runtime_additional_information,
-                **kwargs,
+                **streaming_kwargs,
             )
 
         # ---- Non-streaming path: run full generation in one shot ----
@@ -269,8 +274,8 @@ class Qwen3TTSModelForGeneration(nn.Module):
                 multimodal_outputs={
                     "model_outputs": audio_tensor,
                     "sr": torch.tensor(int(fs), dtype=torch.int),
+                    "is_final": torch.tensor(is_final, dtype=torch.bool),
                 },
-                is_final=is_final,
             )
 
         except StopIteration:
@@ -281,8 +286,8 @@ class Qwen3TTSModelForGeneration(nn.Module):
                 multimodal_outputs={
                     "model_outputs": torch.zeros(1, dtype=torch.float32),
                     "sr": torch.tensor(sample_rate, dtype=torch.int),
+                    "is_final": torch.tensor(True, dtype=torch.bool),
                 },
-                is_final=True,
             )
 
     def _cleanup_streaming(self, request_id: str) -> None:

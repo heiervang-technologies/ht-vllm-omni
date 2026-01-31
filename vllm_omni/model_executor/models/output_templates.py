@@ -11,4 +11,3 @@ class OmniOutput(NamedTuple):
     multimodal_outputs: dict | None = None
     intermediate_tensors: IntermediateTensors | None = None
     next_token_id: torch.Tensor | None = None
-    is_final: bool = True

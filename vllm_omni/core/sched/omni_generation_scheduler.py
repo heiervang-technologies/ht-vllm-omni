@@ -317,9 +317,17 @@ class OmniGenerationScheduler(VLLMScheduler):
 
             # For streaming TTS, is_final=False means more chunks are coming.
             # Only finish the request when is_final=True (default).
+            # After ZMQ deserialization, is_final may be a bool, list,
+            # or tensor depending on how it was serialized.
             is_final = True
             if pooler_output and isinstance(pooler_output, dict):
-                is_final = pooler_output.get("is_final", True)
+                raw = pooler_output.get("is_final", True)
+                if isinstance(raw, (list, tuple)):
+                    is_final = bool(raw[0]) if raw else True
+                elif hasattr(raw, "item"):
+                    is_final = bool(raw.item())
+                else:
+                    is_final = bool(raw)
 
             # Diffusion request: completes in one step; mark finished and free resources.
             # Streaming requests stay alive until is_final=True.
