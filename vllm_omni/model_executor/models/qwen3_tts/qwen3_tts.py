@@ -140,6 +140,13 @@ class Qwen3TTSModelForGeneration(nn.Module):
         # Extract additional parameters from kwargs that the generation methods expect
         request_id = kwargs.get("request_id", None)
 
+        # ---- Fast path: advance an existing streaming generator ----
+        # Check BEFORE extracting params, because .pop() below mutates
+        # the stored additional_information_cpu dict.  On re-scheduled
+        # forward() calls the keys are already gone.
+        if request_id and request_id in self._streaming_generators:
+            return self._advance_streaming(request_id)
+
         runtime_additional_information = kwargs.get("runtime_additional_information", [{}])
         if isinstance(runtime_additional_information, list) and len(runtime_additional_information) > 0:
             runtime_additional_information = runtime_additional_information[0]
@@ -171,7 +178,7 @@ class Qwen3TTSModelForGeneration(nn.Module):
                 },
             )
 
-        # ---- Streaming path: advance or create per-request generator ----
+        # ---- Streaming path: create per-request generator (first call) ----
         if streaming and request_id:
             # Remove keys already extracted to avoid duplicate keyword args
             streaming_kwargs = {
@@ -217,35 +224,43 @@ class Qwen3TTSModelForGeneration(nn.Module):
         runtime_additional_information: dict,
         **kwargs: Any,
     ) -> OmniOutput:
-        """Handle one step of streaming generation for a request.
+        """Create a streaming generator and yield the first chunk.
 
-        Creates a generator on first call, advances it on subsequent calls.
-        Returns OmniOutput with is_final=False for intermediate chunks,
-        is_final=True for the final chunk.
+        Called only on the first forward() for a streaming request.
+        Subsequent calls go through _advance_streaming() (fast path in forward()).
+        """
+        # Create the streaming generator
+        if task_type == "CustomVoice":
+            gen = self.model.generate_custom_voice_streaming(
+                text, speaker=speaker, language=language, instruct=instruct,
+                **runtime_additional_information,
+            )
+        elif task_type == "VoiceDesign":
+            gen = self.model.generate_voice_design_streaming(
+                text, instruct=instruct, language=language,
+                **runtime_additional_information,
+            )
+        elif task_type == "Base":
+            gen = self.model.generate_voice_clone_streaming(
+                text, language=language, **runtime_additional_information,
+            )
+        else:
+            raise ValueError(f"Invalid task type for streaming: {task_type}")
+        self._streaming_generators[request_id] = gen
+
+        # Yield the first chunk
+        return self._advance_streaming(request_id)
+
+    def _advance_streaming(self, request_id: str) -> OmniOutput:
+        """Advance a streaming generator by one chunk and return an OmniOutput.
+
+        Returns is_final=False for intermediate chunks, is_final=True for the
+        last chunk.  On StopIteration (generator exhausted) returns a final
+        empty chunk.
         """
         sample_rate = int(self.model.model.speech_tokenizer.get_output_sample_rate())
-
-        if request_id not in self._streaming_generators:
-            # First call: create the streaming generator
-            if task_type == "CustomVoice":
-                gen = self.model.generate_custom_voice_streaming(
-                    text, speaker=speaker, language=language, instruct=instruct,
-                    **runtime_additional_information,
-                )
-            elif task_type == "VoiceDesign":
-                gen = self.model.generate_voice_design_streaming(
-                    text, instruct=instruct, language=language,
-                    **runtime_additional_information,
-                )
-            elif task_type == "Base":
-                gen = self.model.generate_voice_clone_streaming(
-                    text, language=language, **runtime_additional_information,
-                )
-            else:
-                raise ValueError(f"Invalid task type for streaming: {task_type}")
-            self._streaming_generators[request_id] = gen
-
         gen = self._streaming_generators[request_id]
+
         try:
             wavs, fs, is_final = next(gen)
 
@@ -1208,7 +1223,7 @@ class Qwen3TTSModel:
         speaker: str | list[str],
         language: str | list[str] = None,
         instruct: str | list[str] | None = None,
-        chunk_size: int = 50,
+        chunk_size: int = 10,
         **kwargs: Any,
     ):
         """Streaming variant of :meth:`generate_custom_voice`.
@@ -1270,7 +1285,7 @@ class Qwen3TTSModel:
         text: str | list[str],
         instruct: str | list[str],
         language: str | list[str] = None,
-        chunk_size: int = 50,
+        chunk_size: int = 10,
         **kwargs: Any,
     ):
         """Streaming variant of :meth:`generate_voice_design`.
@@ -1323,7 +1338,7 @@ class Qwen3TTSModel:
         ref_text: str | list[str | None] | None = None,
         x_vector_only_mode: bool | list[bool] = False,
         voice_clone_prompt: dict[str, Any] | list[VoiceClonePromptItem] | None = None,
-        chunk_size: int = 50,
+        chunk_size: int = 10,
         **kwargs: Any,
     ):
         """Streaming variant of :meth:`generate_voice_clone`.

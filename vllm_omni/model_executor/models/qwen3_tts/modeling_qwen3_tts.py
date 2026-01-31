@@ -2497,7 +2497,7 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
         subtalker_temperature: float = 0.9,
         eos_token_id: int | None = None,
         repetition_penalty: float = 1.05,
-        chunk_size: int = 50,
+        chunk_size: int = 10,
         **kwargs,
     ):
         """Generate TTS codec codes in streaming chunks via a manual talker loop.
