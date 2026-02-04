@@ -48,6 +48,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ip", default="127.0.0.1", help="Host/IP for Gradio `launch`.")
     parser.add_argument("--port", type=int, default=7862, help="Port for Gradio `launch`.")
     parser.add_argument("--share", action="store_true", help="Share the Gradio demo publicly.")
+    parser.add_argument(
+        "--quantization",
+        type=str,
+        default=None,
+        choices=["fp8"],
+        help="Quantization method for the diffusion transformer.",
+    )
     args = parser.parse_args()
     args.aspect_ratio_label = next(
         (ratio for ratio, dims in ASPECT_RATIOS.items() if dims == (args.width, args.height)),
@@ -60,7 +67,7 @@ def parse_args() -> argparse.Namespace:
 
 
 @lru_cache(maxsize=1)
-def get_omni(model_name: str) -> Omni:
+def get_omni(model_name: str, quantization: str | None = None) -> Omni:
     # Enable VAE memory optimizations on NPU
     vae_use_slicing = current_omni_platform.is_npu()
     vae_use_tiling = current_omni_platform.is_npu()
@@ -68,11 +75,12 @@ def get_omni(model_name: str) -> Omni:
         model=model_name,
         vae_use_slicing=vae_use_slicing,
         vae_use_tiling=vae_use_tiling,
+        quantization=quantization,
     )
 
 
 def build_demo(args: argparse.Namespace) -> gr.Blocks:
-    omni = get_omni(args.model)
+    omni = get_omni(args.model, quantization=args.quantization)
 
     def run_inference(
         prompt: str,
