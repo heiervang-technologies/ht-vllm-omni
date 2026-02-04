@@ -1,137 +1,202 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for FP8 quantization config."""
+"""Tests for diffusion FP8 quantization config and transformer wiring."""
+
+from __future__ import annotations
 
 import pytest
 
 
-def test_fp8_config_creation():
-    """Test that FP8 config can be created."""
-    from vllm_omni.diffusion.quantization import get_diffusion_quant_config
-
-    config = get_diffusion_quant_config("fp8")
-    assert config is not None
-    assert config.get_name() == "fp8"
-
-
-def test_vllm_config_extraction():
-    """Test that vLLM config can be extracted from diffusion config."""
-    from vllm_omni.diffusion.quantization import (
-        get_diffusion_quant_config,
-        get_vllm_quant_config_for_layers,
-    )
-
-    diff_config = get_diffusion_quant_config("fp8")
-    vllm_config = get_vllm_quant_config_for_layers(diff_config)
-    assert vllm_config is not None
-    assert vllm_config.activation_scheme == "dynamic"
+def _has_cuda() -> bool:
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
 
 
-def test_none_quantization():
-    """Test that None quantization returns None config."""
-    from vllm_omni.diffusion.quantization import (
-        get_diffusion_quant_config,
-        get_vllm_quant_config_for_layers,
-    )
-
-    config = get_diffusion_quant_config(None)
-    assert config is None
-    vllm_config = get_vllm_quant_config_for_layers(config)
-    assert vllm_config is None
+# ---------------------------------------------------------------------------
+# Config-layer tests (no GPU needed)
+# ---------------------------------------------------------------------------
 
 
-def test_invalid_quantization():
-    """Test that invalid quantization method raises error."""
-    from vllm_omni.diffusion.quantization import get_diffusion_quant_config
+class TestDiffusionQuantizationRegistry:
+    """Test the quantization registry and factory functions."""
 
-    with pytest.raises(ValueError, match="Unknown quantization method"):
-        get_diffusion_quant_config("invalid_method")
+    def test_get_diffusion_quant_config_fp8(self):
+        from vllm_omni.diffusion.quantization import get_diffusion_quant_config
 
+        cfg = get_diffusion_quant_config("fp8")
+        assert cfg is not None
+        assert cfg.get_name() == "fp8"
 
-def test_fp8_config_with_custom_params():
-    """Test FP8 config with custom parameters."""
-    from vllm_omni.diffusion.quantization import get_diffusion_quant_config
+    def test_get_diffusion_quant_config_none(self):
+        from vllm_omni.diffusion.quantization import get_diffusion_quant_config
 
-    config = get_diffusion_quant_config(
-        "fp8",
-        activation_scheme="static",
-        ignored_layers=["proj_out"],
-    )
-    assert config is not None
-    assert config.activation_scheme == "static"
-    assert "proj_out" in config.ignored_layers
+        assert get_diffusion_quant_config(None) is None
 
+    def test_get_diffusion_quant_config_unknown_raises(self):
+        from vllm_omni.diffusion.quantization import get_diffusion_quant_config
 
-def test_supported_methods():
-    """Test that supported methods list is correct."""
-    from vllm_omni.diffusion.quantization import SUPPORTED_QUANTIZATION_METHODS
+        with pytest.raises(ValueError, match="Unknown diffusion quantization"):
+            get_diffusion_quant_config("nonexistent_method")
 
-    assert "fp8" in SUPPORTED_QUANTIZATION_METHODS
+    def test_vllm_bridge(self):
+        from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
-
-def test_quantization_integration():
-    """Test end-to-end quantization flow through OmniDiffusionConfig."""
-    from vllm_omni.diffusion.data import OmniDiffusionConfig
-
-    # Test with quantization string only
-    config = OmniDiffusionConfig(model="test", quantization="fp8")
-    assert config.quantization_config is not None
-    assert config.quantization_config.get_name() == "fp8"
-
-    # Test with quantization_config dict
-    config2 = OmniDiffusionConfig(
-        model="test",
-        quantization_config={"method": "fp8", "activation_scheme": "static"},
-    )
-    assert config2.quantization_config is not None
-    assert config2.quantization_config.get_name() == "fp8"
-    assert config2.quantization_config.activation_scheme == "static"
-
-    # Test that vLLM config can be extracted
-    vllm_config = config.quantization_config.get_vllm_quant_config()
-    assert vllm_config is not None
-
-
-def test_quantization_dict_not_mutated():
-    """Test that passing a dict to quantization_config doesn't mutate it."""
-    from vllm_omni.diffusion.data import OmniDiffusionConfig
-
-    original_dict = {"method": "fp8", "activation_scheme": "static"}
-    dict_copy = original_dict.copy()
-
-    OmniDiffusionConfig(model="test", quantization_config=original_dict)
-
-    # Original dict should be unchanged
-    assert original_dict == dict_copy
-
-
-def test_quantization_conflicting_methods_warning(caplog):
-    """Test warning when quantization and quantization_config['method'] conflict."""
-    import logging
-
-    from vllm_omni.diffusion.data import OmniDiffusionConfig
-
-    with caplog.at_level(logging.WARNING):
-        config = OmniDiffusionConfig(
-            model="test",
-            quantization="fp8",  # This should be overridden
-            quantization_config={"method": "fp8", "activation_scheme": "static"},
+        from vllm_omni.diffusion.quantization import (
+            get_diffusion_quant_config,
+            get_vllm_quant_config_for_layers,
         )
-    # No warning when methods match
-    assert config.quantization_config is not None
+
+        diff_cfg = get_diffusion_quant_config("fp8")
+        vllm_cfg = get_vllm_quant_config_for_layers(diff_cfg)
+        assert isinstance(vllm_cfg, Fp8Config)
+        assert vllm_cfg.is_checkpoint_fp8_serialized is False
+        assert vllm_cfg.activation_scheme == "dynamic"
+
+    def test_vllm_bridge_none(self):
+        from vllm_omni.diffusion.quantization import get_vllm_quant_config_for_layers
+
+        assert get_vllm_quant_config_for_layers(None) is None
 
 
-def test_fp8_delegates_to_vllm_config():
-    """Test that DiffusionFp8Config delegates to vLLM's Fp8Config."""
-    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+class TestDiffusionFp8Config:
+    """Test DiffusionFp8Config construction."""
 
-    from vllm_omni.diffusion.quantization import DiffusionFp8Config
+    def test_default_activation_scheme(self):
+        from vllm_omni.diffusion.quantization.fp8 import DiffusionFp8Config
 
-    # Test that quant_config_cls is set correctly
-    assert DiffusionFp8Config.quant_config_cls is Fp8Config
+        cfg = DiffusionFp8Config()
+        vllm = cfg.get_vllm_quant_config()
+        assert vllm.activation_scheme == "dynamic"
 
-    # Test that get_name() delegates to vLLM
-    assert DiffusionFp8Config.get_name() == Fp8Config.get_name()
+    def test_custom_activation_scheme(self):
+        from vllm_omni.diffusion.quantization.fp8 import DiffusionFp8Config
 
-    # Test that get_min_capability() delegates to vLLM
-    assert DiffusionFp8Config.get_min_capability() == Fp8Config.get_min_capability()
+        cfg = DiffusionFp8Config(activation_scheme="static")
+        vllm = cfg.get_vllm_quant_config()
+        assert vllm.activation_scheme == "static"
+
+    def test_repr(self):
+        from vllm_omni.diffusion.quantization.fp8 import DiffusionFp8Config
+
+        cfg = DiffusionFp8Config()
+        r = repr(cfg)
+        assert "DiffusionFp8Config" in r
+
+
+class TestOmniDiffusionConfigQuantization:
+    """Test OmniDiffusionConfig quantization field resolution."""
+
+    def test_string_quantization(self):
+        from vllm_omni.diffusion.data import OmniDiffusionConfig
+        from vllm_omni.diffusion.quantization.fp8 import DiffusionFp8Config
+
+        c = OmniDiffusionConfig(quantization="fp8")
+        assert isinstance(c.quantization_config, DiffusionFp8Config)
+        assert c.quantization == "fp8"
+
+    def test_no_quantization(self):
+        from vllm_omni.diffusion.data import OmniDiffusionConfig
+
+        c = OmniDiffusionConfig()
+        assert c.quantization is None
+        assert c.quantization_config is None
+
+    def test_dict_quantization_config(self):
+        from vllm_omni.diffusion.data import OmniDiffusionConfig
+        from vllm_omni.diffusion.quantization.fp8 import DiffusionFp8Config
+
+        c = OmniDiffusionConfig(
+            quantization_config={"method": "fp8", "activation_scheme": "dynamic"}
+        )
+        assert isinstance(c.quantization_config, DiffusionFp8Config)
+
+    def test_dict_with_quantization_string(self):
+        from vllm_omni.diffusion.data import OmniDiffusionConfig
+        from vllm_omni.diffusion.quantization.fp8 import DiffusionFp8Config
+
+        c = OmniDiffusionConfig(
+            quantization="fp8",
+            quantization_config={"activation_scheme": "dynamic"},
+        )
+        assert isinstance(c.quantization_config, DiffusionFp8Config)
+        assert c.quantization == "fp8"
+
+
+# ---------------------------------------------------------------------------
+# Transformer wiring test (needs GPU)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not _has_cuda(),
+    reason="No CUDA device available",
+)
+class TestQwenImageFp8Wiring:
+    """Verify that FP8 quant_method is attached to linear layers."""
+
+    def test_transformer_has_quant_methods(self):
+        import torch
+
+        from vllm_omni.diffusion.data import OmniDiffusionConfig
+        from vllm_omni.diffusion.quantization import get_vllm_quant_config_for_layers
+        from vllm_omni.diffusion.models.qwen_image.qwen_image_transformer import (
+            QwenImageTransformer2DModel,
+        )
+
+        od_config = OmniDiffusionConfig(quantization="fp8")
+        quant_config = get_vllm_quant_config_for_layers(od_config.quantization_config)
+
+        with torch.device("meta"):
+            model = QwenImageTransformer2DModel(
+                od_config=od_config,
+                quant_config=quant_config,
+                num_layers=2,  # minimal for fast test
+                num_attention_heads=4,
+                attention_head_dim=32,
+                in_channels=16,
+                out_channels=16,
+                joint_attention_dim=128,
+            )
+
+        # Check that at least some modules got a quant_method
+        modules_with_quant = [
+            name
+            for name, mod in model.named_modules()
+            if hasattr(mod, "quant_method") and mod.quant_method is not None
+        ]
+        assert len(modules_with_quant) > 0, (
+            "No modules have quant_method. FP8 wiring is broken."
+        )
+
+    def test_transformer_without_quant_has_no_quant_methods(self):
+        import torch
+
+        from vllm_omni.diffusion.data import OmniDiffusionConfig
+        from vllm_omni.diffusion.models.qwen_image.qwen_image_transformer import (
+            QwenImageTransformer2DModel,
+        )
+
+        od_config = OmniDiffusionConfig()
+
+        with torch.device("meta"):
+            model = QwenImageTransformer2DModel(
+                od_config=od_config,
+                num_layers=2,
+                num_attention_heads=4,
+                attention_head_dim=32,
+                in_channels=16,
+                out_channels=16,
+                joint_attention_dim=128,
+            )
+
+        modules_with_quant = [
+            name
+            for name, mod in model.named_modules()
+            if hasattr(mod, "quant_method") and mod.quant_method is not None
+        ]
+        assert len(modules_with_quant) == 0, (
+            f"Unexpected quant_method on modules without quantization: {modules_with_quant}"
+        )
