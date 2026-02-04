@@ -249,29 +249,32 @@ def _make_structured_model_mock():
 # ---------------------------------------------------------------------------
 
 class TestProfileRunShortCircuit:
-    """Empty text triggers a dummy audio return instead of hanging."""
+    """Empty text caps max_new_tokens to 2 instead of hanging."""
 
-    def test_empty_text_returns_dummy_audio(self):
+    def test_empty_text_caps_max_new_tokens(self):
         wrapper = _make_wrapper()
-        result = wrapper.forward(
-            runtime_additional_information=[{"text": [""]}],
-        )
+        dummy_wav = np.zeros(100, dtype=np.float32)
+        wrapper.model.generate_voice_clone.return_value = ([dummy_wav], 24000)
 
-        assert result.multimodal_outputs is not None
-        audio = result.multimodal_outputs["model_outputs"]
-        assert audio.shape == (24000,)
-        assert result.multimodal_outputs["sr"].item() == 24000
-
-    def test_empty_text_skips_generation(self):
-        wrapper = _make_wrapper()
         wrapper.forward(
             runtime_additional_information=[{"text": [""]}],
         )
 
-        model = wrapper.model
-        model.generate_voice_clone.assert_not_called()
-        model.generate_custom_voice.assert_not_called()
-        model.generate_voice_design.assert_not_called()
+        # Generation is called (pipeline executes) but with capped tokens
+        call_kwargs = wrapper.model.generate_voice_clone.call_args
+        assert call_kwargs[1]["max_new_tokens"] == 2
+
+    def test_empty_text_still_calls_generation(self):
+        wrapper = _make_wrapper()
+        dummy_wav = np.zeros(100, dtype=np.float32)
+        wrapper.model.generate_voice_clone.return_value = ([dummy_wav], 24000)
+
+        wrapper.forward(
+            runtime_additional_information=[{"text": [""]}],
+        )
+
+        # Pipeline executes (not short-circuited) to preserve KV-cache profiling
+        wrapper.model.generate_voice_clone.assert_called_once()
 
     def test_nonempty_text_proceeds_to_generation(self):
         wrapper = _make_wrapper()
