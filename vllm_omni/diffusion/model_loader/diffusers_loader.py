@@ -23,6 +23,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.registry import initialize_model
 
@@ -217,7 +219,25 @@ class DiffusersPipelineLoader:
             logger.debug("Loading weights on %s ...", load_device)
             # Quantization does not happen in `load_weights` but after it
             self.load_weights(model)
+            self._process_weights_after_loading(model, target_device)
         return model.eval()
+
+    @staticmethod
+    def _process_weights_after_loading(model: nn.Module, target_device: torch.device) -> None:
+        """Run quantization post-processing on modules that have a quant_method.
+
+        After weights are loaded in their original dtype, quantization methods
+        (e.g. FP8) need to convert / re-pack them.  This iterates over all
+        sub-modules and calls ``quant_method.process_weights_after_loading``
+        on any module that carries one.
+        """
+        for name, module in model.named_modules():
+            quant_method = getattr(module, "quant_method", None)
+            if quant_method is not None and isinstance(quant_method, QuantizeMethodBase):
+                # Move to target device for weight processing, then keep there
+                module.to(target_device)
+                quant_method.process_weights_after_loading(module)
+                logger.debug("Processed quantized weights for %s", name)
 
     def load_weights(self, model: nn.Module) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}

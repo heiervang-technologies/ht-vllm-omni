@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from collections.abc import Iterable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import PIL.Image
 import torch
@@ -23,9 +23,15 @@ from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.schedulers import FlowUniPCMultistepScheduler
 from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import WanTransformer3DModel
+from vllm_omni.diffusion.quantization import get_vllm_quant_config_for_layers
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.inputs.data import OmniTextPrompt
 from vllm_omni.platforms import current_omni_platform
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +75,9 @@ def load_transformer_config(model_path: str, subfolder: str = "transformer", loc
     return {}
 
 
-def create_transformer_from_config(config: dict) -> WanTransformer3DModel:
+def create_transformer_from_config(
+    config: dict, quant_config: "QuantizationConfig | None" = None
+) -> WanTransformer3DModel:
     """Create WanTransformer3DModel from config dict."""
     kwargs = {}
 
@@ -104,7 +112,7 @@ def create_transformer_from_config(config: dict) -> WanTransformer3DModel:
     if "pos_embed_seq_len" in config:
         kwargs["pos_embed_seq_len"] = config["pos_embed_seq_len"]
 
-    return WanTransformer3DModel(**kwargs)
+    return WanTransformer3DModel(quant_config=quant_config, **kwargs)
 
 
 def get_wan22_post_process_func(
@@ -272,15 +280,16 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin):
         ).to(self.device)
 
         # Initialize transformers with correct config (weights loaded via load_weights)
+        quant_config = get_vllm_quant_config_for_layers(od_config.quantization_config)
         if load_transformer:
             transformer_config = load_transformer_config(model, "transformer", local_files_only)
-            self.transformer = create_transformer_from_config(transformer_config)
+            self.transformer = create_transformer_from_config(transformer_config, quant_config=quant_config)
         else:
             self.transformer = None
 
         if load_transformer_2:
             transformer_2_config = load_transformer_config(model, "transformer_2", local_files_only)
-            self.transformer_2 = create_transformer_from_config(transformer_2_config)
+            self.transformer_2 = create_transformer_from_config(transformer_2_config, quant_config=quant_config)
         else:
             self.transformer_2 = None
 
