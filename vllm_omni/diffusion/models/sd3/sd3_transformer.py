@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -14,6 +17,11 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.data import OmniDiffusionConfig
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+    )
 
 logger = init_logger(__name__)
 
@@ -63,6 +71,7 @@ class SD3CrossAttention(nn.Module):
         context_pre_only: bool = False,
         parallel_attention=False,
         out_dim: int = 0,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         assert dim % num_heads == 0
         super().__init__()
@@ -78,6 +87,7 @@ class SD3CrossAttention(nn.Module):
             head_size=self.head_dim,
             total_num_heads=num_heads,
             disable_tp=True,
+            quant_config=quant_config,
         )
         self.norm_q = RMSNorm(head_dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = RMSNorm(head_dim, eps=eps) if qk_norm else nn.Identity()
@@ -89,16 +99,17 @@ class SD3CrossAttention(nn.Module):
                 head_size=self.inner_kv_dim // self.num_heads,
                 total_num_heads=self.num_heads,
                 disable_tp=True,
+                quant_config=quant_config,
             )
 
         if not context_pre_only:
-            self.to_add_out = ReplicatedLinear(self.inner_dim, self.dim, bias=out_bias)
+            self.to_add_out = ReplicatedLinear(self.inner_dim, self.dim, bias=out_bias, quant_config=quant_config)
         else:
             self.to_add_out = None
 
         if not pre_only:
             self.to_out = nn.ModuleList([])
-            self.to_out.append(ReplicatedLinear(self.inner_dim, self.dim, bias=out_bias))
+            self.to_out.append(ReplicatedLinear(self.inner_dim, self.dim, bias=out_bias, quant_config=quant_config))
         else:
             self.to_out = None
 
@@ -202,6 +213,7 @@ class SD3TransformerBlock(nn.Module):
         context_pre_only: bool = False,
         qk_norm: str | None = None,
         use_dual_attention: bool = False,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
 
@@ -235,6 +247,7 @@ class SD3TransformerBlock(nn.Module):
             out_dim=dim,
             qk_norm=True if qk_norm == "rms_norm" else False,
             eps=1e-6,
+            quant_config=quant_config,
         )
 
         if use_dual_attention:
@@ -245,6 +258,7 @@ class SD3TransformerBlock(nn.Module):
                 out_dim=dim,
                 qk_norm=True if qk_norm == "rms_norm" else False,
                 eps=1e-6,
+                quant_config=quant_config,
             )
         else:
             self.attn2 = None
@@ -330,6 +344,7 @@ class SD3Transformer2DModel(nn.Module):
     def __init__(
         self,
         od_config: OmniDiffusionConfig,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         model_config = od_config.tf_model_config
@@ -374,6 +389,7 @@ class SD3Transformer2DModel(nn.Module):
                     context_pre_only=i == self.num_layers - 1,
                     qk_norm=self.qk_norm,
                     use_dual_attention=True if i in self.dual_attention_layers else False,
+                    quant_config=quant_config,
                 )
                 for i in range(self.num_layers)
             ]

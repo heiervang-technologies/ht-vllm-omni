@@ -7,6 +7,7 @@ Stable Audio DiT Model for vLLM-Omni.
 
 import math
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -17,6 +18,11 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.data import OmniDiffusionConfig
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+    )
 
 logger = init_logger(__name__)
 
@@ -90,6 +96,7 @@ class StableAudioSelfAttention(nn.Module):
         num_key_value_attention_heads: int,
         attention_head_dim: int,
         dropout: float = 0.0,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -99,14 +106,18 @@ class StableAudioSelfAttention(nn.Module):
         self.inner_dim = num_attention_heads * attention_head_dim
 
         # All projections use inner_dim for output
-        self.to_q = ReplicatedLinear(dim, self.inner_dim, bias=False)
-        self.to_k = ReplicatedLinear(dim, self.inner_dim, bias=False)
-        self.to_v = ReplicatedLinear(dim, self.inner_dim, bias=False)
+        self.to_q = ReplicatedLinear(dim, self.inner_dim, bias=False,
+                                     quant_config=quant_config)
+        self.to_k = ReplicatedLinear(dim, self.inner_dim, bias=False,
+                                     quant_config=quant_config)
+        self.to_v = ReplicatedLinear(dim, self.inner_dim, bias=False,
+                                     quant_config=quant_config)
 
         # Output projection
         self.to_out = nn.ModuleList(
             [
-                ReplicatedLinear(self.inner_dim, dim, bias=False),
+                ReplicatedLinear(self.inner_dim, dim, bias=False,
+                                 quant_config=quant_config),
                 nn.Dropout(dropout),
             ]
         )
@@ -174,6 +185,7 @@ class StableAudioCrossAttention(nn.Module):
         attention_head_dim: int,
         cross_attention_dim: int,
         dropout: float = 0.0,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -188,14 +200,18 @@ class StableAudioCrossAttention(nn.Module):
         self.num_kv_groups = num_attention_heads // num_key_value_attention_heads
 
         # Q outputs inner_dim, K/V output kv_dim (GQA)
-        self.to_q = ReplicatedLinear(dim, self.inner_dim, bias=False)
-        self.to_k = ReplicatedLinear(cross_attention_dim, self.kv_dim, bias=False)
-        self.to_v = ReplicatedLinear(cross_attention_dim, self.kv_dim, bias=False)
+        self.to_q = ReplicatedLinear(dim, self.inner_dim, bias=False,
+                                     quant_config=quant_config)
+        self.to_k = ReplicatedLinear(cross_attention_dim, self.kv_dim,
+                                     bias=False, quant_config=quant_config)
+        self.to_v = ReplicatedLinear(cross_attention_dim, self.kv_dim,
+                                     bias=False, quant_config=quant_config)
 
         # Output projection
         self.to_out = nn.ModuleList(
             [
-                ReplicatedLinear(self.inner_dim, dim, bias=False),
+                ReplicatedLinear(self.inner_dim, dim, bias=False,
+                                 quant_config=quant_config),
                 nn.Dropout(dropout),
             ]
         )
@@ -296,6 +312,7 @@ class StableAudioDiTBlock(nn.Module):
         attention_head_dim: int,
         cross_attention_dim: int,
         ff_mult: int = 4,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -306,6 +323,7 @@ class StableAudioDiTBlock(nn.Module):
             num_attention_heads=num_attention_heads,
             num_key_value_attention_heads=num_key_value_attention_heads,
             attention_head_dim=attention_head_dim,
+            quant_config=quant_config,
         )
 
         # Cross-attention with layer norm
@@ -316,6 +334,7 @@ class StableAudioDiTBlock(nn.Module):
             num_key_value_attention_heads=num_key_value_attention_heads,
             attention_head_dim=attention_head_dim,
             cross_attention_dim=cross_attention_dim,
+            quant_config=quant_config,
         )
 
         # Feed-forward with SwiGLU activation
@@ -389,6 +408,7 @@ class StableAudioDiTModel(nn.Module):
         time_proj_dim: int = 256,
         global_states_input_dim: int = 1536,
         cross_attention_input_dim: int = 768,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -464,6 +484,7 @@ class StableAudioDiTModel(nn.Module):
                     num_key_value_attention_heads=num_key_value_attention_heads,
                     attention_head_dim=attention_head_dim,
                     cross_attention_dim=cross_attention_dim,
+                    quant_config=quant_config,
                 )
                 for _ in range(num_layers)
             ]

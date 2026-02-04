@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from collections.abc import Iterable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import PIL.Image
 import torch
@@ -27,6 +27,11 @@ from vllm_omni.diffusion.quantization import get_vllm_quant_config_for_layers
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.inputs.data import OmniTextPrompt
 from vllm_omni.platforms import current_omni_platform
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +75,9 @@ def load_transformer_config(model_path: str, subfolder: str = "transformer", loc
     return {}
 
 
-def create_transformer_from_config(config: dict, quant_config=None) -> WanTransformer3DModel:
+def create_transformer_from_config(
+    config: dict, quant_config: "QuantizationConfig | None" = None
+) -> WanTransformer3DModel:
     """Create WanTransformer3DModel from config dict."""
     kwargs = {}
 
