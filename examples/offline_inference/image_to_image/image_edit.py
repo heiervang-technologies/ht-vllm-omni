@@ -306,6 +306,13 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Number of ready layers (blocks) to keep on GPU during generation.",
     )
+    parser.add_argument(
+        "--quantization",
+        type=str,
+        default=None,
+        choices=["fp8"],
+        help="Quantization method for the diffusion transformer.",
+    )
     return parser.parse_args()
 
 
@@ -370,6 +377,7 @@ def main():
         parallel_config=parallel_config,
         enforce_eager=args.enforce_eager,
         enable_cpu_offload=args.enable_cpu_offload,
+        quantization=args.quantization,
     )
     print("Pipeline loaded")
 

@@ -56,6 +56,13 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Scale factor for LoRA weights (default: 1.0).",
     )
+    parser.add_argument(
+        "--quantization",
+        type=str,
+        default=None,
+        choices=["fp8"],
+        help="Quantization method for the diffusion transformer.",
+    )
     return parser.parse_args()
 
 
@@ -70,7 +77,7 @@ def main():
         omni_kwargs["lora_path"] = args.lora_path
         print(f"Using static LoRA from: {args.lora_path}")
 
-    omni = Omni(model=model, **omni_kwargs)
+    omni = Omni(model=model, quantization=args.quantization, **omni_kwargs)
 
     lora_request = None
     if args.lora_request_path:
