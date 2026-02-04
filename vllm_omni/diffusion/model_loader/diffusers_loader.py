@@ -25,6 +25,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.registry import initialize_model
 
@@ -228,35 +230,25 @@ class DiffusersPipelineLoader:
             logger.debug("Loading weights on %s ...", load_device)
             # Quantization does not happen in `load_weights` but after it
             self.load_weights(model)
-
-            # Process weights after loading for quantization (e.g., FP8 online quantization)
-            # This is needed for vLLM's quantization methods that need to transform weights
             self._process_weights_after_loading(model, target_device)
-
         return model.eval()
 
-    def _process_weights_after_loading(self, model: nn.Module, target_device: torch.device) -> None:
-        """Process weights after loading for quantization methods.
+    @staticmethod
+    def _process_weights_after_loading(model: nn.Module, target_device: torch.device) -> None:
+        """Run quantization post-processing on modules that have a quant_method.
 
-        This handles vLLM's quantization methods that need to process weights
-        after loading (e.g., FP8 online quantization from BF16/FP16 weights).
+        After weights are loaded in their original dtype, quantization methods
+        (e.g. FP8) need to convert / re-pack them.  This iterates over all
+        sub-modules and calls ``quant_method.process_weights_after_loading``
+        on any module that carries one.
         """
-        for _, module in model.named_modules():
+        for name, module in model.named_modules():
             quant_method = getattr(module, "quant_method", None)
-            if isinstance(quant_method, QuantizeMethodBase):
-                # Move module to target device for processing if needed
-                module_device = next(module.parameters(), None)
-                if module_device is not None:
-                    module_device = module_device.device
-                needs_device_move = module_device != target_device
-
-                if needs_device_move:
-                    module.to(target_device)
-
+            if quant_method is not None and isinstance(quant_method, QuantizeMethodBase):
+                # Move to target device for weight processing, then keep there
+                module.to(target_device)
                 quant_method.process_weights_after_loading(module)
-
-                if needs_device_move:
-                    module.to(module_device)
+                logger.debug("Processed quantized weights for %s", name)
 
     def load_weights(self, model: nn.Module) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
