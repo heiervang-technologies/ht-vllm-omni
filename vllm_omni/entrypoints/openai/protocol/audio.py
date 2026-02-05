@@ -50,7 +50,7 @@ class OpenAICreateSpeechRequest(BaseModel):
     )
     speaker_embedding: list[float] | None = Field(
         default=None,
-        description="Pre-computed speaker embedding vector. "
+        description="Pre-computed speaker embedding vector (1024-dim). "
         "When provided, skips speaker encoder extraction from ref_audio. "
         "Implies x_vector_only_mode=True. Mutually exclusive with ref_audio.",
     )
