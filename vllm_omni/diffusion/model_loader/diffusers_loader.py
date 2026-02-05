@@ -217,11 +217,28 @@ class DiffusersPipelineLoader:
         with set_default_torch_dtype(od_config.dtype):
             if has_quant:
                 # When quantizing (e.g. FP8), initialise on CPU so the full
-                # BF16 skeleton doesn't consume all GPU memory.  After weights
-                # are loaded, _process_weights_after_loading moves each module
-                # to GPU, quantises it (shrinking it), and keeps it there.
+                # BF16 skeleton doesn't consume all GPU memory.  Pipeline
+                # components (text_encoder, VAE, transformer) are loaded one
+                # at a time to GPU for quantization, then moved back to CPU.
+                # SequentialOffloader handles GPU placement during inference.
                 with torch.device("cpu"):
                     model = initialize_model(od_config)
+                # Pipeline __init__ may explicitly .to(device) on some
+                # sub-models (e.g. VAE).  Force everything back to CPU.
+                model.to("cpu")
+
+                # Auto-enable combined offloading for quantized models:
+                # - cpu_offload: encoder ↔ transformer mutual-exclusion swap
+                # - layerwise_offload: transformer blocks loaded 1-at-a-time
+                # This keeps peak GPU to max(encoder, 1 block + non-blocks).
+                if not od_config.enable_cpu_offload:
+                    od_config.enable_cpu_offload = True
+                if not od_config.enable_layerwise_offload:
+                    od_config.enable_layerwise_offload = True
+                logger.info(
+                    "Auto-enabling combined offload for quantized model "
+                    "(encoder swap + layerwise block loading)"
+                )
             else:
                 with target_device:
                     model = initialize_model(od_config)
@@ -248,10 +265,13 @@ class DiffusersPipelineLoader:
 
             self._process_weights_after_loading(model, target_device)
 
-            if has_quant:
-                # Move any remaining sub-modules (e.g. norms, embeddings) that
-                # don't have a quant_method to the target device.
-                model.to(target_device)
+            if not has_quant:
+                # Non-quantized path: model is already on target_device from
+                # initialize_model().  Nothing more to do.
+                pass
+            # Quantized path: all modules are on CPU after
+            # _process_weights_after_loading (quantized in-place on GPU then
+            # moved back).  SequentialOffloader will handle GPU placement.
 
         return model.eval()
 
@@ -261,16 +281,19 @@ class DiffusersPipelineLoader:
 
         After weights are loaded in their original dtype, quantization methods
         (e.g. FP8) need to convert / re-pack them.  This iterates over all
-        sub-modules and calls ``quant_method.process_weights_after_loading``
-        on any module that carries one.
+        sub-modules one at a time: move to GPU, quantize (repack), move back
+        to CPU.  Peak GPU usage is a single module's weights, so even large
+        models fit on limited VRAM.
         """
         for name, module in model.named_modules():
             quant_method = getattr(module, "quant_method", None)
             if quant_method is not None and isinstance(quant_method, QuantizeMethodBase):
-                # Move to target device for weight processing, then keep there
+                # Move one module to GPU, quantize, then move back to CPU.
+                # This keeps peak GPU usage to a single layer's weights.
                 module.to(target_device)
                 quant_method.process_weights_after_loading(module)
-                logger.debug("Processed quantized weights for %s", name)
+                module.to("cpu")
+                logger.debug("Quantized weights for %s", name)
 
     def load_weights(self, model: nn.Module) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}

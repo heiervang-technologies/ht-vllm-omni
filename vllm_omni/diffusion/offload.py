@@ -44,6 +44,7 @@ class SequentialOffloader:
         encoders: list[nn.Module],
         device: torch.device,
         pin_memory: bool = True,
+        skip_dit_load: bool = False,
     ):
         assert all(isinstance(m, nn.Module) for m in dits), "All dits must be nn.Module"
         assert all(isinstance(m, nn.Module) for m in encoders), "All encoders must be nn.Module"
@@ -51,6 +52,7 @@ class SequentialOffloader:
         self.encoders = encoders
         self.device = device
         self.pin_memory = pin_memory
+        self._skip_dit_load = skip_dit_load
         self._handles: list = []
 
     def _to_cpu(self, module: nn.Module) -> None:
@@ -87,14 +89,15 @@ class SequentialOffloader:
         module.to(self.device, non_blocking=True)
 
     def _dit_pre_hook(self, module: nn.Module, args: tuple) -> None:
-        """Before DiT forward: offload encoders, load DiT."""
+        """Before DiT forward: offload encoders, optionally load DiT."""
         for enc in self.encoders:
             self._to_cpu(enc)
-        self._to_gpu(module)
+        if not self._skip_dit_load:
+            self._to_gpu(module)
 
         current_omni_platform.synchronize()
 
-        logger.debug("Swapped: encoders -> CPU, DiT -> GPU")
+        logger.debug("Swapped: encoders -> CPU, DiT -> GPU (skip_dit_load=%s)", self._skip_dit_load)
 
     def _encoder_pre_hook(self, module: nn.Module, args: tuple) -> None:
         """Before encoder forward: offload DiT, load encoder."""
@@ -411,14 +414,7 @@ def apply_offload_hooks(
 
     if not enable_cpu_offload and not enable_layerwise_offload:
         return
-    if enable_cpu_offload and enable_layerwise_offload:
-        # NOTE: Model-wise and layerwise cpu offloading are not supported together at this moment,
-        # consider layerwise offloading has higher priority than model-wise offloading
-        enable_cpu_offload = False
-        logger.info(
-            "Model-wise and layer-wise CPU offloading are not supported together at this moment. "
-            "Automatically disabled model-wise offloading."
-        )
+    combined_offload = enable_cpu_offload and enable_layerwise_offload
     # For now, model-wise and layer-wise (block-wise) offloading
     # are functioning as expected when cuda device is available
     if not current_omni_platform.is_cuda() or current_omni_platform.get_device_count() < 1:
@@ -480,7 +476,60 @@ def apply_offload_hooks(
         except Exception as exc:
             logger.debug("Failed to move %s to GPU: %s", name, exc)
 
-    if enable_cpu_offload:
+    if combined_offload:
+        # Combined mode: SequentialOffloader handles encoder ↔ transformer
+        # swapping, while LayerwiseOffloader handles block-level loading
+        # within the transformer.  The SequentialOffloader does NOT try to
+        # load the full transformer to GPU (skip_dit_load=True) — the
+        # LayerwiseOffloader manages that block by block.
+
+        # Keep DiT on CPU; encoders are already on GPU from above.
+        for dit_mod in dit_modules:
+            dit_mod.to("cpu")
+        torch.cuda.empty_cache()
+
+        if pin_cpu_memory:
+            for dit_mod in dit_modules:
+                for p in dit_mod.parameters():
+                    if p.data.device.type == "cpu" and not p.data.is_pinned():
+                        p.data = p.data.pin_memory()
+
+        # Register sequential hooks with skip_dit_load=True so the
+        # SequentialOffloader only offloads encoders before DiT forward.
+        SequentialOffloader(dit_modules, encoders, device, pin_cpu_memory, skip_dit_load=True).register()
+        logger.info(
+            "Combined offload: %s <-> %s (encoder swap) + layerwise (block offload)",
+            ", ".join(dit_names),
+            ", ".join(encoder_names),
+        )
+
+        # Apply layerwise offloading on top.
+        for i, dit_module in enumerate(dit_modules):
+            logger.info(f"Applying layerwise hook on {dit_names[i]} ({dit_module.__class__.__name__})")
+            blocks_attr_name = LayerwiseOffloader.get_blocks_attr_name(dit_module)
+            blocks = LayerwiseOffloader.get_blocks_from_dit(dit_module)
+
+            if not blocks_attr_name or not blocks:
+                logger.warning(
+                    "Target layers (blocks) are not found. "
+                    f"Skipping layerwise offloading on {dit_names[i]} ({dit_module.__class__.__name__})"
+                )
+                continue
+
+            # Move non-block parts of transformer to CPU — the
+            # SequentialOffloader's _dit_pre_hook only offloads encoders.
+            # Non-block modules (norms, embeddings) will be moved to GPU
+            # by the layerwise offloader when the transformer's forward runs.
+            for name, m in dit_module.named_children():
+                if name == blocks_attr_name:
+                    continue
+                m.to(device)
+                logger.debug(f"Moved {name} to device {device}")
+
+            offloader = LayerwiseOffloader(blocks, device, pin_cpu_memory, od_config.layerwise_num_gpu_layers)
+            setattr(dit_module, "_layerwise_offloader", offloader)
+
+    elif enable_cpu_offload:
         # Initial state: keep DiT modules on CPU (encoders typically run first)
         for dit_mod in dit_modules:
             dit_mod.to("cpu")
