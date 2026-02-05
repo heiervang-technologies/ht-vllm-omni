@@ -102,6 +102,10 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 return "'speaker_embedding' is only valid for Base task"
             if request.ref_audio is not None:
                 return "'speaker_embedding' and 'ref_audio' are mutually exclusive"
+            if not request.speaker_embedding:
+                return "'speaker_embedding' must be a non-empty list of floats"
+            if len(request.speaker_embedding) < 64 or len(request.speaker_embedding) > 8192:
+                return f"'speaker_embedding' length {len(request.speaker_embedding)} is outside valid range [64, 8192]"
 
         # Validate Base task requirements
         if task_type == "Base":

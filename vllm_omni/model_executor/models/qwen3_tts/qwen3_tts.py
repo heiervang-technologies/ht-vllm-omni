@@ -961,7 +961,7 @@ class Qwen3TTSModel:
 
         # If a pre-computed speaker embedding is provided, build prompt items directly
         if speaker_embedding is not None and voice_clone_prompt is None:
-            spk_tensor = torch.tensor(speaker_embedding, dtype=torch.float32).to(self.device)
+            spk_tensor = torch.tensor(speaker_embedding).to(self.device)
             prompt_item = VoiceClonePromptItem(
                 ref_code=None,
                 ref_spk_embedding=spk_tensor,
