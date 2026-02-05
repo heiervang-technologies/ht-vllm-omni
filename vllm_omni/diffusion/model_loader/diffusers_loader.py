@@ -25,8 +25,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.registry import initialize_model
 
@@ -220,17 +218,74 @@ class DiffusersPipelineLoader:
     ) -> nn.Module:
         """Load a model with the given configurations."""
         target_device = torch.device(load_device)
+        has_quant = od_config.quantization is not None
+
         with set_default_torch_dtype(od_config.dtype):
-            with target_device:
-                if load_format == "default":
-                    model = initialize_model(od_config)
-                elif load_format == "custom_pipeline":
-                    model_cls = resolve_obj_by_qualname(custom_pipeline_name)
-                    model = model_cls(od_config=od_config)
+            if has_quant:
+                # When quantizing (e.g. FP8), initialise on CPU so the full
+                # BF16 skeleton doesn't consume all GPU memory.  Pipeline
+                # components (text_encoder, VAE, transformer) are loaded one
+                # at a time to GPU for quantization, then moved back to CPU.
+                # SequentialOffloader handles GPU placement during inference.
+                with torch.device("cpu"):
+                    if load_format == "default":
+                        model = initialize_model(od_config)
+                    elif load_format == "custom_pipeline":
+                        model_cls = resolve_obj_by_qualname(custom_pipeline_name)
+                        model = model_cls(od_config=od_config)
+                # Pipeline __init__ may explicitly .to(device) on some
+                # sub-models (e.g. VAE).  Force everything back to CPU.
+                model.to("cpu")
+
+                # Auto-enable combined offloading for quantized models:
+                # - cpu_offload: encoder ↔ transformer mutual-exclusion swap
+                # - layerwise_offload: transformer blocks loaded 1-at-a-time
+                # This keeps peak GPU to max(encoder, 1 block + non-blocks).
+                if not od_config.enable_cpu_offload:
+                    od_config.enable_cpu_offload = True
+                if not od_config.enable_layerwise_offload:
+                    od_config.enable_layerwise_offload = True
+                logger.info(
+                    "Auto-enabling combined offload for quantized model "
+                    "(encoder swap + layerwise block loading)"
+                )
+            else:
+                with target_device:
+                    if load_format == "default":
+                        model = initialize_model(od_config)
+                    elif load_format == "custom_pipeline":
+                        model_cls = resolve_obj_by_qualname(custom_pipeline_name)
+                        model = model_cls(od_config=od_config)
+
+            if has_quant:
+                # Prevent vllm's Fp8OnlineLinearMethod.patched_weight_loader
+                # from calling process_weights_after_loading inline during
+                # load_weights (it would fail because weights are on CPU).
+                # We handle it ourselves in _process_weights_after_loading
+                # after moving each module to GPU.
+                for module in model.modules():
+                    if getattr(module, "quant_method", None) is not None:
+                        module._already_called_process_weights_after_loading = True
             logger.debug("Loading weights on %s ...", load_device)
-            # Quantization does not happen in `load_weights` but after it
             self.load_weights(model)
+
+            if has_quant:
+                # Reset the flag so our _process_weights_after_loading
+                # actually runs the quantization.
+                for module in model.modules():
+                    if hasattr(module, "_already_called_process_weights_after_loading"):
+                        del module._already_called_process_weights_after_loading
+
             self._process_weights_after_loading(model, target_device)
+
+            if not has_quant:
+                # Non-quantized path: model is already on target_device from
+                # initialize_model().  Nothing more to do.
+                pass
+            # Quantized path: all modules are on CPU after
+            # _process_weights_after_loading (quantized in-place on GPU then
+            # moved back).  SequentialOffloader will handle GPU placement.
+
         return model.eval()
 
     @staticmethod
@@ -239,16 +294,19 @@ class DiffusersPipelineLoader:
 
         After weights are loaded in their original dtype, quantization methods
         (e.g. FP8) need to convert / re-pack them.  This iterates over all
-        sub-modules and calls ``quant_method.process_weights_after_loading``
-        on any module that carries one.
+        sub-modules one at a time: move to GPU, quantize (repack), move back
+        to CPU.  Peak GPU usage is a single module's weights, so even large
+        models fit on limited VRAM.
         """
         for name, module in model.named_modules():
             quant_method = getattr(module, "quant_method", None)
             if quant_method is not None and isinstance(quant_method, QuantizeMethodBase):
-                # Move to target device for weight processing, then keep there
+                # Move one module to GPU, quantize, then move back to CPU.
+                # This keeps peak GPU usage to a single layer's weights.
                 module.to(target_device)
                 quant_method.process_weights_after_loading(module)
-                logger.debug("Processed quantized weights for %s", name)
+                module.to("cpu")
+                logger.debug("Quantized weights for %s", name)
 
     def load_weights(self, model: nn.Module) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
