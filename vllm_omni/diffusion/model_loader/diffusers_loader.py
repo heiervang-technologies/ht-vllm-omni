@@ -212,14 +212,47 @@ class DiffusersPipelineLoader:
     def load_model(self, od_config: OmniDiffusionConfig, load_device: str) -> nn.Module:
         """Load a model with the given configurations."""
         target_device = torch.device(load_device)
+        has_quant = od_config.quantization is not None
+
         with set_default_torch_dtype(od_config.dtype):
-            with target_device:
-                model = initialize_model(od_config)
+            if has_quant:
+                # When quantizing (e.g. FP8), initialise on CPU so the full
+                # BF16 skeleton doesn't consume all GPU memory.  After weights
+                # are loaded, _process_weights_after_loading moves each module
+                # to GPU, quantises it (shrinking it), and keeps it there.
+                with torch.device("cpu"):
+                    model = initialize_model(od_config)
+            else:
+                with target_device:
+                    model = initialize_model(od_config)
+
+            if has_quant:
+                # Prevent vllm's Fp8OnlineLinearMethod.patched_weight_loader
+                # from calling process_weights_after_loading inline during
+                # load_weights (it would fail because weights are on CPU).
+                # We handle it ourselves in _process_weights_after_loading
+                # after moving each module to GPU.
+                for module in model.modules():
+                    if getattr(module, "quant_method", None) is not None:
+                        module._already_called_process_weights_after_loading = True
 
             logger.debug("Loading weights on %s ...", load_device)
-            # Quantization does not happen in `load_weights` but after it
             self.load_weights(model)
+
+            if has_quant:
+                # Reset the flag so our _process_weights_after_loading
+                # actually runs the quantization.
+                for module in model.modules():
+                    if hasattr(module, "_already_called_process_weights_after_loading"):
+                        del module._already_called_process_weights_after_loading
+
             self._process_weights_after_loading(model, target_device)
+
+            if has_quant:
+                # Move any remaining sub-modules (e.g. norms, embeddings) that
+                # don't have a quant_method to the target device.
+                model.to(target_device)
+
         return model.eval()
 
     @staticmethod
