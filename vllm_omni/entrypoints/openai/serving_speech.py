@@ -96,12 +96,21 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             if self.supported_speakers and request.voice not in self.supported_speakers:
                 return f"Invalid speaker '{request.voice}'. Supported: {', '.join(sorted(self.supported_speakers))}"
 
+        # Validate speaker_embedding constraints
+        if request.speaker_embedding is not None:
+            if task_type != "Base":
+                return "'speaker_embedding' is only valid for Base task"
+            if request.ref_audio is not None:
+                return "'speaker_embedding' and 'ref_audio' are mutually exclusive"
+
         # Validate Base task requirements
         if task_type == "Base":
-            if request.ref_audio is None:
-                return "Base task requires 'ref_audio' for voice cloning"
+            if request.ref_audio is None and request.speaker_embedding is None:
+                return "Base task requires 'ref_audio' or 'speaker_embedding' for voice cloning"
             # Validate ref_audio format
-            if not (request.ref_audio.startswith(("http://", "https://")) or request.ref_audio.startswith("data:")):
+            if request.ref_audio is not None and not (
+                request.ref_audio.startswith(("http://", "https://")) or request.ref_audio.startswith("data:")
+            ):
                 return "ref_audio must be a URL (http/https) or base64 data URL (data:...)"
 
         # Validate cross-parameter dependencies
@@ -172,7 +181,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             params["ref_audio"] = [request.ref_audio]
         if request.ref_text is not None:
             params["ref_text"] = [request.ref_text]
-        if request.x_vector_only_mode is not None:
+        if request.speaker_embedding is not None:
+            params["speaker_embedding"] = [request.speaker_embedding]
+            # speaker_embedding implies x_vector_only_mode
+            params["x_vector_only_mode"] = [True]
+        elif request.x_vector_only_mode is not None:
             params["x_vector_only_mode"] = [request.x_vector_only_mode]
 
         # Generation parameters
@@ -408,14 +421,49 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
     @staticmethod
     def _extract_audio_output(output: OmniRequestOutput) -> dict | None:
-        """Extract audio dict from OmniRequestOutput, trying both locations."""
+        """Extract audio dict from OmniRequestOutput, trying multiple locations.
+
+        The multimodal output dict (containing ``"audio"`` or ``"model_outputs"``)
+        can live in several places depending on the pipeline:
+
+        1. ``output.multimodal_output``  (OmniRequestOutput property)
+        2. ``output.request_output.multimodal_output``  (RequestOutput level)
+        3. ``output.request_output.outputs[i].multimodal_output``  (CompletionOutput,
+           set via ``setattr`` by the output processor)
+
+        Normalises the audio key to ``"audio"`` so callers can always use
+        ``audio_output["audio"]``.
+        """
+        candidates: list[dict | None] = []
+
+        # Location 1: OmniRequestOutput property / direct attribute
+        if hasattr(output, "multimodal_output"):
+            candidates.append(output.multimodal_output)
+
+        # Location 2 & 3: inside request_output
+        ro = getattr(output, "request_output", None)
+        if ro is not None:
+            candidates.append(getattr(ro, "multimodal_output", None))
+            # Location 3: CompletionOutput level (set via setattr by output processor)
+            for co in getattr(ro, "outputs", []):
+                candidates.append(getattr(co, "multimodal_output", None))
+
+        # Pick the first candidate that is a non-empty dict with audio data
         audio_output = None
-        if hasattr(output, "multimodal_output") and output.multimodal_output:
-            audio_output = output.multimodal_output
-        if (not audio_output or "audio" not in audio_output) and hasattr(output, "request_output"):
-            if output.request_output and hasattr(output.request_output, "multimodal_output"):
-                audio_output = output.request_output.multimodal_output
-        if audio_output and "audio" in audio_output:
+        for candidate in candidates:
+            if not isinstance(candidate, dict) or not candidate:
+                continue
+            if "audio" in candidate or "model_outputs" in candidate:
+                audio_output = candidate
+                break
+
+        if audio_output is None:
+            return None
+
+        # Normalise: some models use "model_outputs" instead of "audio"
+        if "model_outputs" in audio_output and "audio" not in audio_output:
+            audio_output["audio"] = audio_output.pop("model_outputs")
+        if "audio" in audio_output:
             return audio_output
         return None
 

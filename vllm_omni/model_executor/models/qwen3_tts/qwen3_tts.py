@@ -205,7 +205,8 @@ class Qwen3TTSModelForGeneration(nn.Module):
             raise ValueError(f"Invalid task type: {task_type}")
 
         # Convert result to OmniOutput format
-        return self.make_omni_output(result, **kwargs)
+        omni_result = self.make_omni_output(result, **kwargs)
+        return omni_result
 
     def _forward_streaming(
         self,
@@ -887,6 +888,7 @@ class Qwen3TTSModel:
         ref_text: str | list[str | None] | None = None,
         x_vector_only_mode: bool | list[bool] = False,
         voice_clone_prompt: dict[str, Any] | list[VoiceClonePromptItem] | None = None,
+        speaker_embedding: list[float] | None = None,
         **kwargs: Any,
     ) -> tuple[list[np.ndarray], int]:
         """
@@ -956,6 +958,18 @@ class Qwen3TTSModel:
             raise ValueError(f"Batch size mismatch: text={len(texts)}, language={len(languages)}")
 
         self._validate_languages(languages)
+
+        # If a pre-computed speaker embedding is provided, build prompt items directly
+        if speaker_embedding is not None and voice_clone_prompt is None:
+            spk_tensor = torch.tensor(speaker_embedding, dtype=torch.float32).to(self.device)
+            prompt_item = VoiceClonePromptItem(
+                ref_code=None,
+                ref_spk_embedding=spk_tensor,
+                x_vector_only_mode=True,
+                icl_mode=False,
+            )
+            prompt_items = [prompt_item] * len(texts)
+            voice_clone_prompt = prompt_items
 
         if voice_clone_prompt is None:
             if ref_audio is None:
