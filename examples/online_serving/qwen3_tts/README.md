@@ -82,11 +82,61 @@ curl http://localhost:8000/v1/audio/voices
 
 ## API Reference
 
-### Endpoint
+### Endpoints
+#### GET /v1/audio/voices
 
+List all available voices/speakers from the loaded model, including both built-in model voices and uploaded custom voices.
+
+**Response Example:**
+```json
+{
+  "voices": ["vivian", "ryan", "custom_voice_1"],
+  "uploaded_voices": [
+    {
+      "name": "custom_voice_1",
+      "consent": "user_consent_id",
+      "created_at": 1738660000,
+      "file_size": 1024000,
+      "mime_type": "audio/wav"
+    }
+  ]
+}
 ```
-POST /v1/audio/speech
+
+#### POST /v1/audio/voices
+
+Upload a new voice sample for voice cloning in Base task TTS requests.
+
+**Form Parameters:**
+- `audio_sample` (required): Audio file (max 10MB, supported formats: wav, mp3, flac, ogg, aac, webm, mp4)
+- `consent` (required): Consent recording ID
+- `name` (required): Name for the new voice
+
+**Response Example:**
+```json
+{
+  "success": true,
+  "voice": {
+    "name": "custom_voice_1",
+    "consent": "user_consent_id",
+    "created_at": 1738660000,
+    "mime_type": "audio/wav",
+    "file_size": 1024000
+  }
+}
 ```
+
+**Usage Example:**
+```bash
+curl -X POST http://localhost:8000/v1/audio/voices \
+  -F "audio_sample=@/path/to/voice_sample.wav" \
+  -F "consent=user_consent_id" \
+  -F "name=custom_voice_1"
+```
+
+
+#### POST /v1/audio/speech
+
 
 This endpoint follows the [OpenAI Audio Speech API](https://platform.openai.com/docs/api-reference/audio/createSpeech) format with additional Qwen3-TTS parameters.
 
