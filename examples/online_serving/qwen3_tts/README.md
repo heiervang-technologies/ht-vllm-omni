@@ -126,6 +126,8 @@ Upload a new voice sample for voice cloning in Base task TTS requests.
 }
 ```
 
+> **Note:** Voice names are sanitized to alphanumeric characters, underscores, and hyphens. The `SPEECH_VOICE_SAMPLES` environment variable controls the storage directory (default: `/tmp/voice_samples`).
+
 **Usage Example:**
 ```bash
 curl -X POST http://localhost:8000/v1/audio/voices \

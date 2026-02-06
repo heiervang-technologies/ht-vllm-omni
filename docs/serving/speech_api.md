@@ -142,7 +142,6 @@ Upload a new voice sample for voice cloning in Base task TTS requests.
   "voice": {
     "name": "custom_voice_1",
     "consent": "user_consent_id",
-    "file_path": "/tmp/voice_samples/custom_voice_1_user_consent_id_1738660000.wav",
     "created_at": 1738660000,
     "mime_type": "audio/wav",
     "file_size": 1024000
