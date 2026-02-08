@@ -4,9 +4,10 @@
 import enum
 import os
 import random
-from collections.abc import Callable
+import warnings
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from pydantic import model_validator
@@ -15,6 +16,9 @@ from vllm.config.utils import config
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.utils.network_utils import is_port_available
+
+if TYPE_CHECKING:
+    from vllm_omni.diffusion.quantization.base import DiffusionQuantizationConfig
 
 logger = init_logger(__name__)
 
@@ -359,6 +363,10 @@ class OmniDiffusionConfig:
     # support multi images input
     supports_multimodal_inputs: bool = False
 
+    # Quantization
+    quantization: str | None = None
+    quantization_config: "DiffusionQuantizationConfig | dict[str, Any] | None" = None
+
     # Logging
     log_level: str = "info"
 
@@ -451,10 +459,51 @@ class OmniDiffusionConfig:
             # If it's neither dict nor DiffusionCacheConfig, convert to empty config
             self.cache_config = DiffusionCacheConfig()
 
+        # Convert quantization config: dict/string -> DiffusionQuantizationConfig
+        self._resolve_quantization_config()
+
         if self.max_cpu_loras is None:
             self.max_cpu_loras = 1
         elif self.max_cpu_loras < 1:
             raise ValueError("max_cpu_loras must be >= 1 for diffusion LoRA")
+
+    def _resolve_quantization_config(self) -> None:
+        """Resolve quantization and quantization_config into a single config object."""
+        from vllm_omni.diffusion.quantization import get_diffusion_quant_config
+        from vllm_omni.diffusion.quantization.base import DiffusionQuantizationConfig
+
+        if isinstance(self.quantization_config, (dict, Mapping)):
+            # Extract method from dict, pass rest as kwargs
+            cfg = dict(self.quantization_config)
+            method = cfg.pop("method", None) or cfg.pop("quantization", None)
+
+            if method and self.quantization and method != self.quantization:
+                warnings.warn(
+                    f"quantization={self.quantization!r} conflicts with "
+                    f"quantization_config method={method!r}. "
+                    f"Using quantization={self.quantization!r}.",
+                    stacklevel=2,
+                )
+                method = self.quantization
+
+            method = method or self.quantization
+            if method is not None:
+                self.quantization_config = get_diffusion_quant_config(method, **cfg)
+                self.quantization = method
+            else:
+                self.quantization_config = None
+
+        elif self.quantization_config is None and self.quantization is not None:
+            self.quantization_config = get_diffusion_quant_config(self.quantization)
+
+        # Final type check
+        if self.quantization_config is not None and not isinstance(
+            self.quantization_config, DiffusionQuantizationConfig
+        ):
+            raise TypeError(
+                f"quantization_config must be a DiffusionQuantizationConfig, "
+                f"got {type(self.quantization_config)!r}"
+            )
 
     def update_multimodal_support(self) -> None:
         self.supports_multimodal_inputs = self.model_class_name in {"QwenImageEditPlusPipeline"}

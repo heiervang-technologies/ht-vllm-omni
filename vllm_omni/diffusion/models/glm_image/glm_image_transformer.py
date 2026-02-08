@@ -3,7 +3,7 @@
 
 from collections.abc import Iterable
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -18,6 +18,11 @@ from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.cache.base import CachedTransformer
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+    )
 
 logger = init_logger(__name__)
 
@@ -328,6 +333,7 @@ class GlmImageAttention(nn.Module):
         head_dim: int,
         out_bias: bool = True,
         eps: float = 1e-5,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
         self.dim = dim
@@ -342,6 +348,7 @@ class GlmImageAttention(nn.Module):
             total_num_heads=num_heads,
             disable_tp=True,
             bias=True,
+            quant_config=quant_config,
         )
 
         # QK normalization (LayerNorm, not RMSNorm for GLM-Image)
@@ -456,6 +463,7 @@ class GlmImageTransformerBlock(nn.Module):
         num_attention_heads: int = 64,
         attention_head_dim: int = 40,
         time_embed_dim: int = 512,
+        quant_config: "QuantizationConfig | None" = None,
     ) -> None:
         super().__init__()
 
@@ -465,6 +473,7 @@ class GlmImageTransformerBlock(nn.Module):
             dim=dim,
             num_heads=num_attention_heads,
             head_dim=attention_head_dim,
+            quant_config=quant_config,
         )
 
         # 2. Feedforward
@@ -558,6 +567,7 @@ class GlmImageTransformer2DModel(CachedTransformer):
     def __init__(
         self,
         od_config: OmniDiffusionConfig,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -604,7 +614,8 @@ class GlmImageTransformer2DModel(CachedTransformer):
         # 3. Transformer blocks
         self.transformer_blocks = nn.ModuleList(
             [
-                GlmImageTransformerBlock(inner_dim, num_attention_heads, attention_head_dim, time_embed_dim)
+                GlmImageTransformerBlock(inner_dim, num_attention_heads, attention_head_dim, time_embed_dim,
+                                        quant_config=quant_config)
                 for _ in range(num_layers)
             ]
         )

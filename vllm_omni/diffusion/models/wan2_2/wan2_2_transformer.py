@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,11 @@ from vllm_omni.diffusion.distributed.sp_plan import (
     SequenceParallelInput,
     SequenceParallelOutput,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+    )
 
 logger = init_logger(__name__)
 
@@ -215,6 +220,7 @@ class WanSelfAttention(nn.Module):
         head_dim: int,
         eps: float = 1e-5,
         dropout: float = 0.0,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -230,6 +236,7 @@ class WanSelfAttention(nn.Module):
             total_num_heads=num_heads,
             bias=True,
             disable_tp=True,
+            quant_config=quant_config,
         )
 
         # QK normalization using vLLM's RMSNorm
@@ -239,7 +246,7 @@ class WanSelfAttention(nn.Module):
         # Output projection
         self.to_out = nn.ModuleList(
             [
-                ReplicatedLinear(self.inner_dim, dim, bias=True),
+                ReplicatedLinear(self.inner_dim, dim, bias=True, quant_config=quant_config),
                 nn.Dropout(dropout),
             ]
         )
@@ -302,6 +309,7 @@ class WanCrossAttention(nn.Module):
         eps: float = 1e-5,
         dropout: float = 0.0,
         added_kv_proj_dim: int | None = None,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -312,11 +320,11 @@ class WanCrossAttention(nn.Module):
         self.kv_inner_dim = head_dim * num_heads  # For cross-attention, K/V come from encoder
 
         # Query projection
-        self.to_q = ReplicatedLinear(dim, self.inner_dim, bias=True)
+        self.to_q = ReplicatedLinear(dim, self.inner_dim, bias=True, quant_config=quant_config)
 
         # Separate K and V projections for cross-attention
-        self.to_k = ReplicatedLinear(dim, self.kv_inner_dim, bias=True)
-        self.to_v = ReplicatedLinear(dim, self.kv_inner_dim, bias=True)
+        self.to_k = ReplicatedLinear(dim, self.kv_inner_dim, bias=True, quant_config=quant_config)
+        self.to_v = ReplicatedLinear(dim, self.kv_inner_dim, bias=True, quant_config=quant_config)
 
         # QK normalization
         self.norm_q = RMSNorm(self.inner_dim, eps=eps)
@@ -325,8 +333,8 @@ class WanCrossAttention(nn.Module):
         # Optional added KV projections for I2V (image embeddings)
         self.added_kv_proj_dim = added_kv_proj_dim
         if added_kv_proj_dim is not None:
-            self.add_k_proj = ReplicatedLinear(added_kv_proj_dim, self.inner_dim, bias=True)
-            self.add_v_proj = ReplicatedLinear(added_kv_proj_dim, self.inner_dim, bias=True)
+            self.add_k_proj = ReplicatedLinear(added_kv_proj_dim, self.inner_dim, bias=True, quant_config=quant_config)
+            self.add_v_proj = ReplicatedLinear(added_kv_proj_dim, self.inner_dim, bias=True, quant_config=quant_config)
             self.norm_added_k = RMSNorm(self.inner_dim, eps=eps)
         else:
             self.add_k_proj = None
@@ -336,7 +344,7 @@ class WanCrossAttention(nn.Module):
         # Output projection
         self.to_out = nn.ModuleList(
             [
-                ReplicatedLinear(self.inner_dim, dim, bias=True),
+                ReplicatedLinear(self.inner_dim, dim, bias=True, quant_config=quant_config),
                 nn.Dropout(dropout),
             ]
         )
@@ -420,6 +428,7 @@ class WanTransformerBlock(nn.Module):
         eps: float = 1e-6,
         added_kv_proj_dim: int | None = None,
         cross_attn_norm: bool = False,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -432,6 +441,7 @@ class WanTransformerBlock(nn.Module):
             num_heads=num_heads,
             head_dim=head_dim,
             eps=eps,
+            quant_config=quant_config,
         )
 
         # 2. Cross-attention
@@ -441,6 +451,7 @@ class WanTransformerBlock(nn.Module):
             head_dim=head_dim,
             eps=eps,
             added_kv_proj_dim=added_kv_proj_dim,
+            quant_config=quant_config,
         )
         self.norm2 = FP32LayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
 
@@ -576,6 +587,7 @@ class WanTransformer3DModel(nn.Module):
         added_kv_proj_dim: int | None = None,
         rope_max_seq_len: int = 1024,
         pos_embed_seq_len: int | None = None,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -627,7 +639,10 @@ class WanTransformer3DModel(nn.Module):
         # 3. Transformer blocks
         self.blocks = nn.ModuleList(
             [
-                WanTransformerBlock(inner_dim, ffn_dim, num_attention_heads, eps, added_kv_proj_dim, cross_attn_norm)
+                WanTransformerBlock(
+                    inner_dim, ffn_dim, num_attention_heads, eps, added_kv_proj_dim, cross_attn_norm,
+                    quant_config=quant_config,
+                )
                 for _ in range(num_layers)
             ]
         )

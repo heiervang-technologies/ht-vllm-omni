@@ -16,7 +16,7 @@
 # limitations under the License.
 
 from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -33,6 +33,11 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+    )
 
 logger = init_logger(__name__)
 
@@ -52,6 +57,7 @@ class OvisImageAttention(nn.Module):
         out_dim: int = None,
         context_pre_only: bool | None = None,
         pre_only: bool = False,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -76,6 +82,7 @@ class OvisImageAttention(nn.Module):
             total_num_heads=self.heads,
             disable_tp=True,
             bias=bias,
+            quant_config=quant_config,
         )
 
         if not self.pre_only:
@@ -93,9 +100,10 @@ class OvisImageAttention(nn.Module):
                 total_num_heads=self.heads,
                 disable_tp=True,
                 bias=added_proj_bias,
+                quant_config=quant_config,
             )
 
-            self.to_add_out = ReplicatedLinear(self.inner_dim, query_dim, bias=out_bias)
+            self.to_add_out = ReplicatedLinear(self.inner_dim, query_dim, bias=out_bias, quant_config=quant_config)
 
         self.rope = RotaryEmbedding(is_neox_style=False)
         self.attn = Attention(
@@ -167,7 +175,14 @@ class OvisImageAttention(nn.Module):
 
 
 class OvisImageSingleTransformerBlock(nn.Module):
-    def __init__(self, dim: int, num_attention_heads: int, attention_head_dim: int, mlp_ratio: float = 4.0):
+    def __init__(
+        self,
+        dim: int,
+        num_attention_heads: int,
+        attention_head_dim: int,
+        mlp_ratio: float = 4.0,
+        quant_config: "QuantizationConfig | None" = None,
+    ):
         super().__init__()
         self.mlp_hidden_dim = int(dim * mlp_ratio)
 
@@ -184,6 +199,7 @@ class OvisImageSingleTransformerBlock(nn.Module):
             bias=True,
             eps=1e-6,
             pre_only=True,
+            quant_config=quant_config,
         )
 
     def forward(
@@ -229,6 +245,7 @@ class OvisImageTransformerBlock(nn.Module):
         attention_head_dim: int,
         qk_norm: str = "rms_norm",
         eps: float = 1e-6,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -244,6 +261,7 @@ class OvisImageTransformerBlock(nn.Module):
             context_pre_only=False,
             bias=True,
             eps=eps,
+            quant_config=quant_config,
         )
 
         self.norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
@@ -383,6 +401,7 @@ class OvisImageTransformer2DModel(nn.Module):
         num_attention_heads: int = 24,
         joint_attention_dim: int = 2048,
         axes_dims_rope: tuple[int] = (16, 56, 56),
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
         model_config = od_config.tf_model_config
@@ -405,6 +424,7 @@ class OvisImageTransformer2DModel(nn.Module):
                     dim=self.inner_dim,
                     num_attention_heads=num_attention_heads,
                     attention_head_dim=attention_head_dim,
+                    quant_config=quant_config,
                 )
                 for _ in range(num_layers)
             ]
@@ -416,6 +436,7 @@ class OvisImageTransformer2DModel(nn.Module):
                     dim=self.inner_dim,
                     num_attention_heads=num_attention_heads,
                     attention_head_dim=attention_head_dim,
+                    quant_config=quant_config,
                 )
                 for _ in range(num_single_layers)
             ]

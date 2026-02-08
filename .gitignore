@@ -233,3 +233,7 @@ configs/development.yaml
 Dockerfile.dev
 discussion
 tmp_test
+
+# Local dev artifacts
+.hai-verification
+uv.lock

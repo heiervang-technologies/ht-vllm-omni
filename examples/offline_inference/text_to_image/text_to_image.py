@@ -134,6 +134,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable VAE tiling for memory optimization.",
     )
+    parser.add_argument(
+        "--quantization",
+        type=str,
+        default=None,
+        choices=["fp8"],
+        help="Quantization method for the diffusion transformer.",
+    )
     return parser.parse_args()
 
 
@@ -193,6 +200,7 @@ def main():
         parallel_config=parallel_config,
         enforce_eager=args.enforce_eager,
         enable_cpu_offload=args.enable_cpu_offload,
+        quantization=args.quantization,
     )
 
     if profiler_enabled:

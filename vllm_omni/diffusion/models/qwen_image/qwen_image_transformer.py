@@ -4,7 +4,7 @@
 from collections.abc import Iterable
 from functools import lru_cache
 from math import prod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -36,6 +36,11 @@ from vllm_omni.diffusion.distributed.sp_plan import (
 from vllm_omni.diffusion.forward_context import get_forward_context
 from vllm_omni.diffusion.layers.adalayernorm import AdaLayerNorm
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+    )
 
 logger = init_logger(__name__)
 
@@ -390,7 +395,15 @@ class QwenEmbedRope(nn.Module):
 
 
 class ColumnParallelApproxGELU(nn.Module):
-    def __init__(self, dim_in: int, dim_out: int, *, approximate: str, bias: bool = True):
+    def __init__(
+        self,
+        dim_in: int,
+        dim_out: int,
+        *,
+        approximate: str,
+        bias: bool = True,
+        quant_config: "QuantizationConfig | None" = None,
+    ):
         super().__init__()
         self.proj = ColumnParallelLinear(
             dim_in,
@@ -398,6 +411,7 @@ class ColumnParallelApproxGELU(nn.Module):
             bias=bias,
             gather_output=False,
             return_bias=False,
+            quant_config=quant_config,
         )
         self.approximate = approximate
 
@@ -415,6 +429,7 @@ class FeedForward(nn.Module):
         activation_fn: str = "gelu-approximate",
         inner_dim: int | None = None,
         bias: bool = True,
+        quant_config: "QuantizationConfig | None" = None,
     ) -> None:
         super().__init__()
 
@@ -424,13 +439,14 @@ class FeedForward(nn.Module):
         dim_out = dim_out or dim
 
         layers: list[nn.Module] = [
-            ColumnParallelApproxGELU(dim, inner_dim, approximate="tanh", bias=bias),
+            ColumnParallelApproxGELU(dim, inner_dim, approximate="tanh", bias=bias, quant_config=quant_config),
             nn.Identity(),  # placeholder for weight loading
             RowParallelLinear(
                 inner_dim,
                 dim_out,
                 input_is_parallel=True,
                 return_bias=False,
+                quant_config=quant_config,
             ),
         ]
 
@@ -456,6 +472,7 @@ class QwenImageCrossAttention(nn.Module):
         pre_only: bool = False,
         context_pre_only: bool = False,
         out_dim: int | None = None,
+        quant_config: "QuantizationConfig | None" = None,
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0
@@ -471,6 +488,7 @@ class QwenImageCrossAttention(nn.Module):
             hidden_size=dim,
             head_size=self.head_dim,
             total_num_heads=num_heads,
+            quant_config=quant_config,
         )
         self.query_num_heads = self.to_qkv.num_heads
         self.kv_num_heads = self.to_qkv.num_kv_heads
@@ -485,6 +503,7 @@ class QwenImageCrossAttention(nn.Module):
             hidden_size=added_kv_proj_dim,
             head_size=head_dim,
             total_num_heads=num_heads,
+            quant_config=quant_config,
         )
         self.add_query_num_heads = self.add_kv_proj.num_heads
         self.add_kv_num_heads = self.add_kv_proj.num_kv_heads
@@ -496,6 +515,7 @@ class QwenImageCrossAttention(nn.Module):
             bias=out_bias,
             input_is_parallel=True,
             return_bias=False,
+            quant_config=quant_config,
         )
 
         assert not pre_only
@@ -505,6 +525,7 @@ class QwenImageCrossAttention(nn.Module):
             bias=out_bias,
             input_is_parallel=True,
             return_bias=False,
+            quant_config=quant_config,
         )
 
         self.norm_added_q = RMSNorm(head_dim, eps=eps)
@@ -637,6 +658,7 @@ class QwenImageTransformerBlock(nn.Module):
         qk_norm: str = "rms_norm",
         eps: float = 1e-6,
         zero_cond_t: bool = False,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -656,9 +678,10 @@ class QwenImageTransformerBlock(nn.Module):
             added_kv_proj_dim=dim,
             context_pre_only=False,
             head_dim=attention_head_dim,
+            quant_config=quant_config,
         )
         self.img_norm2 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
-        self.img_mlp = FeedForward(dim=dim, dim_out=dim)
+        self.img_mlp = FeedForward(dim=dim, dim_out=dim, quant_config=quant_config)
 
         # Text processing modules
         self.txt_mod = nn.Sequential(
@@ -668,7 +691,7 @@ class QwenImageTransformerBlock(nn.Module):
         self.txt_norm1 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
         # Text doesn't need separate attention - it's handled by img_attn joint computation
         self.txt_norm2 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
-        self.txt_mlp = FeedForward(dim=dim, dim_out=dim)
+        self.txt_mlp = FeedForward(dim=dim, dim_out=dim, quant_config=quant_config)
 
         self.zero_cond_t = zero_cond_t
 
@@ -862,6 +885,7 @@ class QwenImageTransformer2DModel(CachedTransformer):
         zero_cond_t: bool = False,
         use_additional_t_cond: bool = False,
         use_layer3d_rope: bool = False,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
         self.parallel_config = od_config.parallel_config
@@ -891,6 +915,7 @@ class QwenImageTransformer2DModel(CachedTransformer):
                     num_attention_heads=num_attention_heads,
                     attention_head_dim=attention_head_dim,
                     zero_cond_t=zero_cond_t,
+                    quant_config=quant_config,
                 )
                 for _ in range(num_layers)
             ]
