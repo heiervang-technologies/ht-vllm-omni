@@ -21,6 +21,10 @@ class OpenAICreateSpeechRequest(BaseModel):
         ge=0.25,
         le=4.0,
     )
+    stream: bool = Field(
+        default=False,
+        description="Enable streaming audio output. Audio is returned in chunks via chunked transfer encoding.",
+    )
     stream_format: Literal["sse", "audio"] | None = "audio"
 
     # Qwen3-TTS specific parameters
@@ -43,6 +47,12 @@ class OpenAICreateSpeechRequest(BaseModel):
     x_vector_only_mode: bool | None = Field(
         default=None,
         description="Use speaker embedding only without in-context learning (Base task)",
+    )
+    speaker_embedding: list[float] | None = Field(
+        default=None,
+        description="Pre-computed speaker embedding vector (1024-dim). "
+        "When provided, skips speaker encoder extraction from ref_audio. "
+        "Implies x_vector_only_mode=True. Mutually exclusive with ref_audio.",
     )
     max_new_tokens: int | None = Field(
         default=None,

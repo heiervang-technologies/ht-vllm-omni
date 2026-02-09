@@ -1135,6 +1135,75 @@ class Qwen3TTSTalkerCodePredictorModel(Qwen3TTSPreTrainedModel):
         )
 
 
+def _sample_token(
+    logits: torch.Tensor,
+    do_sample: bool,
+    top_p: float,
+    top_k: int,
+    temperature: float,
+) -> torch.Tensor:
+    """Sample a token from logits with top-k/top-p/temperature.
+
+    Args:
+        logits: [B, vocab_size] unnormalized logits.
+        do_sample: If False, return greedy argmax.
+        top_p: Nucleus sampling threshold (1.0 = disabled).
+        top_k: Top-k filtering value (0 = disabled).
+        temperature: Sampling temperature (1.0 = no scaling).
+
+    Returns:
+        Token IDs of shape [B, 1].
+    """
+    if not do_sample:
+        return logits.argmax(dim=-1, keepdim=True)
+
+    if temperature != 1.0 and temperature > 0:
+        logits = logits / temperature
+
+    if top_k > 0:
+        top_k = min(top_k, logits.size(-1))
+        threshold = torch.topk(logits, top_k)[0][..., -1:]
+        logits = logits.masked_fill(logits < threshold, float("-inf"))
+
+    if 0.0 < top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+        # Keep tokens whose cumulative probability (before this token) < top_p
+        sorted_mask = (cumulative_probs - sorted_logits.softmax(dim=-1)) >= top_p
+        indices_to_remove = sorted_mask.scatter(-1, sorted_indices, sorted_mask)
+        logits = logits.masked_fill(indices_to_remove, float("-inf"))
+
+    probs = logits.softmax(dim=-1)
+    return torch.multinomial(probs, num_samples=1)
+
+
+def _apply_repetition_penalty(
+    logits: torch.Tensor,
+    generated_ids: list[torch.Tensor],
+    penalty: float,
+) -> None:
+    """Apply repetition penalty to logits in-place.
+
+    For each token that appears in ``generated_ids``, positive logits are
+    divided by ``penalty`` and negative logits are multiplied by ``penalty``,
+    making repeated tokens less likely.
+
+    Args:
+        logits: [B, vocab_size] unnormalized logits (modified in-place).
+        generated_ids: List of previously generated token tensors, each [B]
+            or [B, 1].
+        penalty: Repetition penalty factor (1.0 = no penalty).
+    """
+    if penalty == 1.0 or not generated_ids:
+        return
+    # Collect unique token IDs across all past steps
+    past_ids = torch.cat([t.view(-1) for t in generated_ids]).unique()
+    score = logits[:, past_ids]
+    # Where score > 0, divide; where score < 0, multiply
+    score = torch.where(score > 0, score / penalty, score * penalty)
+    logits[:, past_ids] = score
+
+
 class Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
@@ -1294,6 +1363,86 @@ class Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(Qwen3TTSPreTraine
         )
         model_kwargs["generation_steps"] = outputs.generation_steps
         return model_kwargs
+
+    def generate_codes(
+        self,
+        inputs_embeds: torch.Tensor,
+        do_sample: bool,
+        top_p: float,
+        top_k: int,
+        temperature: float,
+    ) -> torch.Tensor:
+        """Generate codebook tokens with an explicit KV-cached loop.
+
+        Replaces ``self.generate()`` (HF ``GenerationMixin``) with a manual
+        prefill + decode loop that manages a ``DynamicCache`` directly.  This
+        eliminates per-step framework overhead (logits processors, stopping
+        criteria, model-kwargs bookkeeping) and is a prerequisite for future
+        CUDA-graph capture of the code-predictor inner loop.
+
+        The output is functionally equivalent to::
+
+            result = self.generate(
+                inputs_embeds=inputs_embeds,
+                max_new_tokens=num_code_groups - 1,
+                do_sample=do_sample, top_p=top_p,
+                top_k=top_k, temperature=temperature,
+                output_hidden_states=True,
+                return_dict_in_generate=True,
+            )
+            return result.sequences          # shape [B, num_code_groups - 1]
+
+        Args:
+            inputs_embeds: ``[B, 2, H]`` – talker hidden state concatenated
+                with the first-codebook embedding.
+            do_sample: Use sampling (``True``) or greedy argmax (``False``).
+            top_p: Nucleus-sampling threshold (1.0 disables).
+            top_k: Top-k filtering (0 disables).
+            temperature: Softmax temperature (1.0 = no scaling).
+
+        Returns:
+            ``torch.Tensor`` of shape ``[B, num_code_groups - 1]`` containing
+            the generated codebook token IDs (codebooks 2 … N).
+        """
+        num_codes = self.config.num_code_groups - 1  # 31 for the 32-codebook model
+
+        # -- project prefill embeddings -------------------------------------
+        projected = self.small_to_mtp_projection(inputs_embeds)
+
+        # -- create KV cache ------------------------------------------------
+        cache = DynamicCache()
+
+        # -- prefill: run both input tokens through the transformer ---------
+        outputs = self.model(
+            inputs_embeds=projected,
+            past_key_values=cache,
+            use_cache=True,
+        )
+
+        # First codebook token (codebook 2) via lm_head[0]
+        logits = self.lm_head[0](outputs.last_hidden_state[:, -1:, :]).squeeze(1)
+        token = _sample_token(logits, do_sample, top_p, top_k, temperature)
+        sequences = [token]
+
+        # -- autoregressive decode for codebooks 3 … N ----------------------
+        for step in range(1, num_codes):
+            # Embed previous token with the step-specific embedding layer
+            embeds = self.model.codec_embedding[step - 1](token)
+            projected = self.small_to_mtp_projection(embeds)
+
+            # Single-token decode with KV cache
+            outputs = self.model(
+                inputs_embeds=projected,
+                past_key_values=cache,
+                use_cache=True,
+            )
+
+            logits = self.lm_head[step](outputs.last_hidden_state[:, -1:, :]).squeeze(1)
+            token = _sample_token(logits, do_sample, top_p, top_k, temperature)
+            sequences.append(token)
+
+        # [B, 1] × num_codes  →  [B, num_codes]
+        return torch.cat(sequences, dim=-1)
 
 
 @dataclass
@@ -1648,21 +1797,18 @@ class Qwen3TTSTalkerForConditionalGeneration(Qwen3TTSTalkerTextPreTrainedModel, 
         # Generate
         else:
             last_id_hidden = self.get_input_embeddings()(input_ids)
-            predictor_result = self.code_predictor.generate(
+            predicted_codes = self.code_predictor.generate_codes(
                 inputs_embeds=torch.cat((past_hidden, last_id_hidden), dim=1),
-                max_new_tokens=self.config.num_code_groups - 1,
                 do_sample=subtalker_dosample,
                 top_p=subtalker_top_p,
                 top_k=subtalker_top_k,
                 temperature=subtalker_temperature,
-                output_hidden_states=True,
-                return_dict_in_generate=True,
             )
-            codec_ids = torch.cat((input_ids, predictor_result.sequences), dim=-1)
+            codec_ids = torch.cat((input_ids, predicted_codes), dim=-1)
             codec_hiddens = torch.cat(
                 [last_id_hidden]
                 + [
-                    self.code_predictor.get_input_embeddings()[i](predictor_result.sequences[..., i : i + 1])
+                    self.code_predictor.get_input_embeddings()[i](predicted_codes[..., i : i + 1])
                     for i in range(self.config.num_code_groups - 1)
                 ],
                 dim=1,
@@ -2005,51 +2151,24 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
                 text_embed = torch.cat([text_embed] + [tts_pad_embed] * (codec_lens - text_lens), dim=1)
                 return text_embed + codec_embed, tts_pad_embed
 
-    @torch.no_grad()
-    def generate(
+    def _prepare_talker_inputs(
         self,
-        input_ids: list[torch.Tensor] | None = None,
+        input_ids: list[torch.Tensor],
         instruct_ids: list[torch.Tensor] | None = None,
         ref_ids: list[torch.Tensor] | None = None,
-        voice_clone_prompt: list[dict] = None,
-        languages: list[str] = None,
-        speakers: list[str] = None,
-        non_streaming_mode=False,
-        max_new_tokens: int = 4096,
-        do_sample: bool = True,
-        top_k: int = 50,
-        top_p: float = 1.0,
-        temperature: float = 0.9,
-        subtalker_dosample: bool = True,
-        subtalker_top_k: int = 50,
-        subtalker_top_p: float = 1.0,
-        subtalker_temperature: float = 0.9,
-        eos_token_id: int | None = None,
-        repetition_penalty: float = 1.05,
-        **kwargs,
-    ):
-        talker_kwargs = {
-            "max_new_tokens": max_new_tokens,
-            "min_new_tokens": 2,
-            "do_sample": do_sample,
-            "top_k": top_k,
-            "top_p": top_p,
-            "temperature": temperature,
-            "subtalker_dosample": subtalker_dosample,
-            "subtalker_top_k": subtalker_top_k,
-            "subtalker_top_p": subtalker_top_p,
-            "subtalker_temperature": subtalker_temperature,
-            "eos_token_id": eos_token_id if eos_token_id is not None else self.config.talker_config.codec_eos_token_id,
-            "repetition_penalty": repetition_penalty,
-            "suppress_tokens": [
-                i
-                for i in range(self.config.talker_config.vocab_size - 1024, self.config.talker_config.vocab_size)
-                if i not in (self.config.talker_config.codec_eos_token_id,)
-            ],
-            "output_hidden_states": getattr(kwargs, "output_hidden_states", True),
-            "return_dict_in_generate": getattr(kwargs, "return_dict_in_generate", True),
-        }
+        voice_clone_prompt: list[dict] | None = None,
+        languages: list[str] | None = None,
+        speakers: list[str] | None = None,
+        non_streaming_mode: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Prepare talker input embeddings, attention mask, and trailing text.
 
+        Shared by :meth:`generate` and :meth:`generate_streaming`.
+
+        Returns:
+            ``(talker_input_embeds, talker_attention_mask,
+              trailing_text_hiddens, tts_pad_embed)``
+        """
         talker_input_embeds = [[] for _ in range(len(input_ids))]
 
         voice_clone_spk_embeds = None
@@ -2288,6 +2407,65 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
         padded_hiddens[padding_mask] = pad_embedding_vector
         trailing_text_hiddens = padded_hiddens
 
+        return talker_input_embeds, talker_attention_mask, trailing_text_hiddens, tts_pad_embed
+
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: list[torch.Tensor] | None = None,
+        instruct_ids: list[torch.Tensor] | None = None,
+        ref_ids: list[torch.Tensor] | None = None,
+        voice_clone_prompt: list[dict] = None,
+        languages: list[str] = None,
+        speakers: list[str] = None,
+        non_streaming_mode=False,
+        max_new_tokens: int = 4096,
+        do_sample: bool = True,
+        top_k: int = 50,
+        top_p: float = 1.0,
+        temperature: float = 0.9,
+        subtalker_dosample: bool = True,
+        subtalker_top_k: int = 50,
+        subtalker_top_p: float = 1.0,
+        subtalker_temperature: float = 0.9,
+        eos_token_id: int | None = None,
+        repetition_penalty: float = 1.05,
+        **kwargs,
+    ):
+        talker_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "min_new_tokens": 2,
+            "do_sample": do_sample,
+            "top_k": top_k,
+            "top_p": top_p,
+            "temperature": temperature,
+            "subtalker_dosample": subtalker_dosample,
+            "subtalker_top_k": subtalker_top_k,
+            "subtalker_top_p": subtalker_top_p,
+            "subtalker_temperature": subtalker_temperature,
+            "eos_token_id": eos_token_id if eos_token_id is not None else self.config.talker_config.codec_eos_token_id,
+            "repetition_penalty": repetition_penalty,
+            "suppress_tokens": [
+                i
+                for i in range(self.config.talker_config.vocab_size - 1024, self.config.talker_config.vocab_size)
+                if i not in (self.config.talker_config.codec_eos_token_id,)
+            ],
+            "output_hidden_states": getattr(kwargs, "output_hidden_states", True),
+            "return_dict_in_generate": getattr(kwargs, "return_dict_in_generate", True),
+        }
+
+        talker_input_embeds, talker_attention_mask, trailing_text_hiddens, tts_pad_embed = (
+            self._prepare_talker_inputs(
+                input_ids=input_ids,
+                instruct_ids=instruct_ids,
+                ref_ids=ref_ids,
+                voice_clone_prompt=voice_clone_prompt,
+                languages=languages,
+                speakers=speakers,
+                non_streaming_mode=non_streaming_mode,
+            )
+        )
+
         # forward
         talker_result = self.talker.generate(
             inputs_embeds=talker_input_embeds,
@@ -2316,6 +2494,187 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
         talker_hidden_states_list = [talker_hidden_states[i, :length, :] for i, length in enumerate(effective_lengths)]
 
         return talker_codes_list, talker_hidden_states_list
+
+    @torch.no_grad()
+    def generate_streaming(
+        self,
+        input_ids: list[torch.Tensor] | None = None,
+        instruct_ids: list[torch.Tensor] | None = None,
+        ref_ids: list[torch.Tensor] | None = None,
+        voice_clone_prompt: list[dict] = None,
+        languages: list[str] = None,
+        speakers: list[str] = None,
+        non_streaming_mode=False,
+        max_new_tokens: int = 4096,
+        do_sample: bool = True,
+        top_k: int = 50,
+        top_p: float = 1.0,
+        temperature: float = 0.9,
+        subtalker_dosample: bool = True,
+        subtalker_top_k: int = 50,
+        subtalker_top_p: float = 1.0,
+        subtalker_temperature: float = 0.9,
+        eos_token_id: int | None = None,
+        repetition_penalty: float = 1.05,
+        chunk_size: int = 10,
+        **kwargs,
+    ):
+        """Generate TTS codec codes in streaming chunks via a manual talker loop.
+
+        Instead of calling ``self.talker.generate()`` which blocks until the
+        full sequence is produced, this method runs the talker's prefill +
+        autoregressive decode loop manually. Every *chunk_size* codec frames,
+        the accumulated codes are yielded to the caller so they can be decoded
+        to audio and streamed to the client before generation finishes.
+
+        The manual loop is functionally equivalent to HF ``generate()`` with
+        greedy / sampling, repetition penalty, and suppress-token masking.
+
+        Args:
+            input_ids .. repetition_penalty: Same as :meth:`generate`.
+            chunk_size: Number of codec frames per yielded chunk.
+
+        Yields:
+            ``(codes_chunk, hidden_chunk, is_final)`` where:
+            - *codes_chunk* is ``[B, T, num_codebooks]`` codec codes for
+              *T* ≤ *chunk_size* frames.
+            - *hidden_chunk* is ``[B, T, H]`` last-layer hidden states (one
+              per frame), used by voice cloning post-processing.
+            - *is_final* is ``True`` on the last chunk.
+        """
+        eos_id = (
+            eos_token_id
+            if eos_token_id is not None
+            else self.config.talker_config.codec_eos_token_id
+        )
+        suppress_token_ids = torch.tensor(
+            [
+                i
+                for i in range(
+                    self.config.talker_config.vocab_size - 1024,
+                    self.config.talker_config.vocab_size,
+                )
+                if i != eos_id
+            ],
+            dtype=torch.long,
+        )
+
+        # ---- prepare inputs (shared with generate()) -------------------------
+        talker_input_embeds, talker_attention_mask, trailing_text_hiddens, tts_pad_embed = (
+            self._prepare_talker_inputs(
+                input_ids=input_ids,
+                instruct_ids=instruct_ids,
+                ref_ids=ref_ids,
+                voice_clone_prompt=voice_clone_prompt,
+                languages=languages,
+                speakers=speakers,
+                non_streaming_mode=non_streaming_mode,
+            )
+        )
+
+        device = talker_input_embeds.device
+        batch_size = talker_input_embeds.shape[0]
+        prefill_len = talker_input_embeds.shape[1]
+
+        # ---- prefill ----------------------------------------------------------
+        outputs = self.talker(
+            inputs_embeds=talker_input_embeds,
+            attention_mask=talker_attention_mask,
+            use_cache=True,
+            output_hidden_states=True,
+            trailing_text_hidden=trailing_text_hiddens,
+            tts_pad_embed=tts_pad_embed,
+            subtalker_dosample=subtalker_dosample,
+            subtalker_top_p=subtalker_top_p,
+            subtalker_top_k=subtalker_top_k,
+            subtalker_temperature=subtalker_temperature,
+        )
+
+        # Sample first codec token
+        logits = outputs.logits[:, -1, :]
+        logits[:, suppress_token_ids] = float("-inf")
+        next_token = _sample_token(logits, do_sample, top_p, top_k, temperature)
+
+        # State from prefill
+        past_hidden = outputs.past_hidden
+        generation_step = outputs.generation_step
+        past_kv = outputs.past_key_values
+        current_pos = prefill_len
+
+        # Accumulation buffers
+        all_codec_ids: list[torch.Tensor] = []
+        all_hidden_states: list[torch.Tensor] = []
+        generated_ids: list[torch.Tensor] = [next_token.squeeze(-1)]
+
+        # ---- autoregressive decode loop --------------------------------------
+        for _ in range(max_new_tokens):
+            # Check EOS (first codebook token)
+            if batch_size == 1 and next_token.squeeze().item() == eos_id:
+                break
+
+            # Extend attention mask by one position
+            talker_attention_mask = torch.cat(
+                [
+                    talker_attention_mask,
+                    torch.ones(batch_size, 1, device=device, dtype=talker_attention_mask.dtype),
+                ],
+                dim=1,
+            )
+            cache_position = torch.tensor([current_pos], device=device, dtype=torch.long)
+
+            outputs = self.talker(
+                input_ids=next_token,
+                attention_mask=talker_attention_mask,
+                cache_position=cache_position,
+                past_key_values=past_kv,
+                use_cache=True,
+                output_hidden_states=True,
+                past_hidden=past_hidden,
+                generation_step=generation_step,
+                trailing_text_hidden=trailing_text_hiddens,
+                tts_pad_embed=tts_pad_embed,
+                subtalker_dosample=subtalker_dosample,
+                subtalker_top_p=subtalker_top_p,
+                subtalker_top_k=subtalker_top_k,
+                subtalker_temperature=subtalker_temperature,
+            )
+
+            # Extract codec frame from this step
+            codec_ids = outputs.hidden_states[1]  # (HF_hidden_states, codec_ids)
+            if codec_ids is not None:
+                all_codec_ids.append(codec_ids)
+                all_hidden_states.append(outputs.past_hidden)
+
+            # Update state
+            past_hidden = outputs.past_hidden
+            generation_step = outputs.generation_step
+            past_kv = outputs.past_key_values
+            current_pos += 1
+
+            # Sample next token with repetition penalty
+            logits = outputs.logits[:, -1, :]
+            logits[:, suppress_token_ids] = float("-inf")
+            if repetition_penalty != 1.0:
+                _apply_repetition_penalty(logits, generated_ids, repetition_penalty)
+            next_token = _sample_token(logits, do_sample, top_p, top_k, temperature)
+            generated_ids.append(next_token.squeeze(-1))
+
+            # Yield chunk when enough frames accumulated
+            if len(all_codec_ids) >= chunk_size:
+                codes_chunk = torch.stack(all_codec_ids, dim=1)
+                hidden_chunk = torch.cat(all_hidden_states, dim=1)
+                yield codes_chunk, hidden_chunk, False
+                all_codec_ids = []
+                all_hidden_states = []
+
+        # ---- yield final chunk -----------------------------------------------
+        if all_codec_ids:
+            codes_chunk = torch.stack(all_codec_ids, dim=1)
+            hidden_chunk = torch.cat(all_hidden_states, dim=1)
+            yield codes_chunk, hidden_chunk, True
+        else:
+            # EOS landed exactly on a chunk boundary; signal completion
+            yield None, None, True
 
 
 __all__ = [
