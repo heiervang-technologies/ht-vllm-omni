@@ -226,7 +226,12 @@ class OrchestratorAggregator:
             and finished
             and (multimodal_output := output_to_yield.multimodal_output.get("audio")) is not None
         ):
-            nframes = int(multimodal_output[-1].shape[0])
+            # multimodal_output is a single tensor for non-streaming,
+            # or a list of tensors for streaming (accumulated chunks).
+            if isinstance(multimodal_output, list):
+                nframes = int(multimodal_output[-1].shape[0])
+            else:
+                nframes = int(multimodal_output.shape[0])
             stage_events_for_req = self.stage_events.get(request_id, [])
             if stage_events_for_req:
                 for stage_event in stage_events_for_req:
