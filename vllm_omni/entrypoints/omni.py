@@ -10,6 +10,7 @@ from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Literal, overload
 
+import huggingface_hub
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 from vllm import SamplingParams
@@ -40,6 +41,9 @@ from vllm_omni.entrypoints.utils import (
 )
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniPromptType, OmniSamplingParams
 from vllm_omni.metrics import OrchestratorAggregator, StageRequestStats
+from vllm_omni.model_executor.model_loader.weight_utils import (
+    download_weights_from_hf_specific,
+)
 from vllm_omni.outputs import OmniRequestOutput
 
 logger = init_logger(__name__)
@@ -66,14 +70,31 @@ def _dummy_snapshot_download(model_id):
 
 
 def omni_snapshot_download(model_id) -> str:
+    # If it's already a local path, just return it
+    if os.path.exists(model_id):
+        return model_id
     # TODO: this is just a workaround for quickly use modelscope, we should support
     # modelscope in weight loading feature instead of using `snapshot_download`
     if os.environ.get("VLLM_USE_MODELSCOPE", False):
         from modelscope.hub.snapshot_download import snapshot_download
 
         return snapshot_download(model_id)
-    else:
-        return _dummy_snapshot_download(model_id)
+    # For other cases (Hugging Face), perform a real download to ensure all
+    # necessary files (including *.pt for audio/diffusion) are available locally
+    # before stage workers are spawned. This prevents initialization timeouts.
+    # Return the original model_id so that model_config.model preserves
+    # HuggingFace semantics (e.g. "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
+    # instead of the resolved cache path.
+    try:
+        download_weights_from_hf_specific(
+            model_name_or_path=model_id,
+            cache_dir=None,
+            allow_patterns=["*"],
+            require_all=True,
+        )
+    except huggingface_hub.errors.RepositoryNotFoundError:
+        logger.warning(f"Repository not found for '{model_id}'.")
+    return model_id
 
 
 class OmniBase:
@@ -800,7 +821,7 @@ class Omni(OmniBase):
                         request_output=engine_outputs,
                     )
 
-                    # Record audio generated frames with unified signature
+                    # Record audio generated frames (only when finished)
                     try:
                         finished = (
                             engine_outputs.finished
@@ -813,7 +834,8 @@ class Omni(OmniBase):
                                 else False
                             )
                         )
-                        metrics.record_audio_generated_frames(output_to_yield, finished, stage_id, req_id)
+                        if finished:
+                            metrics.record_audio_generated_frames(output_to_yield, stage_id, req_id)
                     except Exception as e:
                         logger.exception(
                             f"[{self._name}] Failed to record audio metrics for req {req_id} at stage {stage_id}: {e}",

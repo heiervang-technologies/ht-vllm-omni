@@ -181,11 +181,11 @@ cd examples/offline_inference/text_to_image
 python text_to_image.py \
     --model Your-org/your-model \
     --prompt "a cup of coffee on the table" \
-    --negative_prompt "ugly, unclear" \
-    --cfg_scale 4.0 \
-    --num_inference_steps 50 \
+    --negative-prompt "ugly, unclear" \
+    --cfg-scale 4.0 \
+    --num-inference-steps 50 \
     --output "tp_enabled.png" \
-    --tensor_parallel_size 2
+    --tensor-parallel-size 2
 ```
 
 **Verify:**
@@ -264,7 +264,7 @@ Complete examples in the codebase:
 | **Z-Image** | `vllm_omni/diffusion/models/z_image/z_image_transformer.py` | Standard TP | Full implementation with validation |
 | **FLUX** | `vllm_omni/diffusion/models/flux/flux_transformer.py` | Dual-stream | Image + text streams |
 | **Qwen-Image** | `vllm_omni/diffusion/models/qwen_image/qwen_image_transformer.py` | Standard TP | With RoPE |
-| **TP Tests** | `tests/e2e/offline_inference/test_zimage_tensor_parallel.py` | E2E testing | TP correctness and performance |
+| **TP Tests** | `tests/e2e/offline_inference/test_zimage_parallelism.py` | E2E testing | TP correctness and performance |
 | **Constraint Tests** | `tests/diffusion/models/z_image/test_zimage_tp_constraints.py` | Unit testing | Validation logic |
 
 ---

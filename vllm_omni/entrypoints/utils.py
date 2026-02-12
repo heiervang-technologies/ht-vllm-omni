@@ -280,3 +280,68 @@ def get_final_stage_id_for_e2e(
         final_stage_id_for_e2e = last_stage_id
 
     return final_stage_id_for_e2e
+
+
+# The following code detects if the process is running in a container and if
+# PID host is available. If so, we can use process-scoped memory tracking;
+# otherwise we need sequential init locks.
+
+
+def _read_text(path: str) -> str | None:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+
+
+def in_container() -> bool:
+    # Common Docker signal
+    if os.path.exists("/.dockerenv"):
+        return True
+
+    # cgroup markers (works for Docker/containerd/K8s/Podman in many setups)
+    cg = _read_text("/proc/1/cgroup") or ""
+    markers = ("docker", "containerd", "kubepods", "libpod", "podman")
+    return any(m in cg for m in markers)
+
+
+def _nvml_pid_matches() -> bool | None:
+    """Check if os.getpid() matches what NVML would report via NSpid.
+
+    If /proc/self/status has a single NSpid entry, the container PID equals
+    the host PID, so NVML process-scoped memory tracking works correctly.
+
+    Returns:
+      True  -> PID namespaces match (single NSpid entry)
+      False -> PID namespaces differ (multiple NSpid entries)
+      None  -> cannot determine
+    """
+    status = _read_text("/proc/self/status")
+    if status is None:
+        return None
+    for line in status.splitlines():
+        if line.startswith("NSpid:"):
+            pids = line.split()[1:]
+            # Single PID means container PID == host PID
+            return len(pids) == 1
+    return None
+
+
+def detect_pid_host() -> bool:
+    """Check if os.getpid() matches the PID that NVML will report.
+
+    NVML always reports host-namespace PIDs.  If this process lives in a
+    different PID namespace the match will fail and process-scoped memory
+    tracking won't work.  We detect this via the NSpid field in
+    /proc/self/status: a single entry means host PID == container PID.
+    """
+    if not in_container():
+        return True
+
+    result = _nvml_pid_matches()
+    if result is not None:
+        return result
+
+    # Cannot determine — assume mismatch to be safe.
+    return False
