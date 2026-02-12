@@ -100,7 +100,7 @@ class Qwen3TTSModelForGeneration(nn.Module):
                 except RuntimeError as e:
                     logger.warning("Failed to compile code predictor layers: %s. Continuing without compilation.", e)
 
-        self.task_type = model_path.split("-")[-1].strip("/")
+        self.task_type = model_path.split("-")[-1].split("/")[0]
         # Mark that this model produces multimodal outputs
         self.have_multimodal_outputs = True
 
