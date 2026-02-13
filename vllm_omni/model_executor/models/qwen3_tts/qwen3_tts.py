@@ -107,8 +107,34 @@ class Qwen3TTSModelForGeneration(nn.Module):
         # Store vllm_config for potential future use
         self.vllm_config = vllm_config
 
+        # Enable CUDA Graph for speech tokenizer decoder
+        self._enable_decoder_cudagraph()
+
         # Streaming state: one generator per active streaming request
         self._streaming_generators: dict[str, Generator] = {}
+
+    def _enable_decoder_cudagraph(self, device=None):
+        try:
+            inner_model = getattr(self.model, "model", None)
+            if inner_model is not None and hasattr(inner_model, "speech_tokenizer"):
+                tokenizer = inner_model.speech_tokenizer
+                if hasattr(tokenizer, "model") and hasattr(tokenizer.model, "decoder"):
+                    decoder = tokenizer.model.decoder
+                    # Determine device - use provided device or default to cuda:0
+                    if device is None:
+                        device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+                    # Move decoder to CUDA if not already there
+                    current_device = next(decoder.parameters()).device
+                    if current_device != device:
+                        decoder.to(device)
+                        logger.info(f"Moved decoder from {current_device} to {device}")
+                    if hasattr(decoder, "enable_cudagraph") and device.type == "cuda":
+                        decoder.enable_cudagraph(capture_sizes=[25, 50, 100, 150, 200, 250, 300])
+                        logger.info("CUDA Graph enabled for speech tokenizer decoder")
+                    elif device.type != "cuda":
+                        logger.info("CUDA Graph not enabled: decoder not on CUDA device")
+        except Exception as e:
+            logger.warning(f"Failed to enable CUDA Graph: {e}")
 
     def forward(
         self,
