@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" src="https://raw.githubusercontent.com/vllm-project/vllm-omni/refs/heads/main/docs/source/logos/vllm-omni-logo.png">
-    <img alt="vllm-omni" src="https://raw.githubusercontent.com/vllm-project/vllm-omni/refs/heads/main/docs/source/logos/vllm-omni-logo.png" width=55%>
+    <source media="(prefers-color-scheme: dark)" src="docs/source/logos/ht-vllm-omni-logo.png">
+    <img alt="ht-vllm-omni" src="docs/source/logos/ht-vllm-omni-logo.png" width=55%>
   </picture>
 </p>
 <h3 align="center">
@@ -15,9 +15,37 @@ Easy, fast, and cheap omni-modality model serving for everyone
 
 ---
 
+## HT Fork Changes
+
+This is the [Heiervang Technologies](https://github.com/heiervang-technologies) fork of vLLM-Omni. The `ht` branch contains the following changes on top of upstream `main`:
+
+### Qwen3 TTS Streaming
+- HTTP-level streaming for TTS speech API (`/v1/audio/speech`)
+- Model-level streaming for TTS with chunked audio output
+- `tts-stream` bash tool for low-latency streaming playback
+- Preset voice support for tts-stream
+- Stride-0 tensor serialization fix for streaming TTS
+
+### Qwen3 TTS Performance
+- Manual KV-cached loop for code predictor — avoids redundant recomputation *(upstream has this for qwen3_omni; HT's version targets qwen3_tts)*
+- Regional `torch.compile` for code predictor decoder layers *(upstream has this for qwen3_omni; HT's version targets qwen3_tts)*
+- CUDA graph support for speech tokenizer decoder *(cherry-picked from unmerged upstream PR [#1205](https://github.com/vllm-project/vllm-omni/pull/1205))*
+
+### Qwen3 TTS Bug Fixes
+- ~~Fix Qwen3 TTS 0.6B profile run hang~~ *(now in upstream)*
+- ~~Cap `max_new_tokens` during profile run instead of short-circuiting~~ *(now in upstream)*
+- SDPA attention fallback when flash-attn is unavailable
+- ~~Handle single tensor in audio frame metrics for non-streaming TTS~~ *(superseded by upstream fix)*
+
+### Speaker Embedding
+- Speaker embedding support for voice cloning (`speaker_embedding` parameter)
+- Speaker embedding examples and inference scripts
+
+---
+
 *Latest News* 🔥
 
-- [2026/02] We released [0.14.0](https://github.com/vllm-project/vllm-omni/releases/tag/v0.14.0) - This is the first **stable release** of vLLM-Omni that expands Omni’s diffusion / image-video generation and audio / TTS stack, improves distributed execution and memory efficiency, and broadens platform/backend coverage (GPU/ROCm/NPU/XPU). It also brings meaningful upgrades to serving APIs, profiling & benchmarking, and overall stability. Please check our latest [paper](https://arxiv.org/abs/2602.02204) for architecture design and performance results.
+- [2026/02] We released [0.14.0](https://github.com/vllm-project/vllm-omni/releases/tag/v0.14.0) - This is the first **stable release** of vLLM-Omni that expands Omni's diffusion / image-video generation and audio / TTS stack, improves distributed execution and memory efficiency, and broadens platform/backend coverage (GPU/ROCm/NPU/XPU). It also brings meaningful upgrades to serving APIs, profiling & benchmarking, and overall stability. Please check our latest [paper](https://arxiv.org/abs/2602.02204) for architecture design and performance results.
 - [2026/01] We released [0.12.0rc1](https://github.com/vllm-project/vllm-omni/releases/tag/v0.12.0rc1) - a major RC milestone focused on maturing the diffusion stack, strengthening OpenAI-compatible serving, expanding omni-model coverage, and improving stability across platforms (GPU/NPU/ROCm).
 - [2025/11] vLLM community officially released [vllm-project/vllm-omni](https://github.com/vllm-project/vllm-omni) in order to support omni-modality models serving.
 
