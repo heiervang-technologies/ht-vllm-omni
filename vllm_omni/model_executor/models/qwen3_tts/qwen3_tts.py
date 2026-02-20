@@ -73,8 +73,8 @@ class Qwen3TTSModelForGeneration(nn.Module):
 
             attn_kwargs = {"attn_implementation": "flash_attention_2"}
         except ImportError:
-            logger.warning("Flash-Attn is not installed. Using default PyTorch attention implementation.")
-            attn_kwargs = {}
+            logger.info("flash-attn not installed. Falling back to PyTorch SDPA attention.")
+            attn_kwargs = {"attn_implementation": "sdpa"}
 
         self.model = Qwen3TTSModel.from_pretrained(
             model_path,
