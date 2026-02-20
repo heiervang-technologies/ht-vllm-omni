@@ -35,15 +35,15 @@ This is the [Heiervang Technologies](https://github.com/heiervang-technologies) 
 - Stride-0 tensor serialization fix for streaming TTS
 
 ### Qwen3 TTS Performance
-- Manual KV-cached loop for code predictor — avoids redundant recomputation
-- Regional `torch.compile` for code predictor decoder layers
-- CUDA graph support for speech tokenizer decoder
+- Manual KV-cached loop for code predictor — avoids redundant recomputation *(upstream has this for qwen3_omni; HT's version targets qwen3_tts)*
+- Regional `torch.compile` for code predictor decoder layers *(upstream has this for qwen3_omni; HT's version targets qwen3_tts)*
+- CUDA graph support for speech tokenizer decoder *(cherry-picked from unmerged upstream PR [#1205](https://github.com/vllm-project/vllm-omni/pull/1205))*
 
 ### Qwen3 TTS Bug Fixes
-- Fix Qwen3 TTS 0.6B profile run hang
-- Cap `max_new_tokens` during profile run instead of short-circuiting
+- ~~Fix Qwen3 TTS 0.6B profile run hang~~ *(now in upstream)*
+- ~~Cap `max_new_tokens` during profile run instead of short-circuiting~~ *(now in upstream)*
 - SDPA attention fallback when flash-attn is unavailable
-- Handle single tensor in audio frame metrics for non-streaming TTS
+- ~~Handle single tensor in audio frame metrics for non-streaming TTS~~ *(superseded by upstream fix)*
 
 ### Speaker Embedding
 - Speaker embedding support for voice cloning (`speaker_embedding` parameter)
