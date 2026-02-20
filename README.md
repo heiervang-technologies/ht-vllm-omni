@@ -23,6 +23,34 @@ Easy, fast, and cheap omni-modality model serving for everyone
 
 ---
 
+## HT Fork Changes
+
+This is the [Heiervang Technologies](https://github.com/heiervang-technologies) fork of vLLM-Omni. The `ht` branch contains the following changes on top of upstream `main`:
+
+### Qwen3 TTS Streaming
+- HTTP-level streaming for TTS speech API (`/v1/audio/speech`)
+- Model-level streaming for TTS with chunked audio output
+- `tts-stream` bash tool for low-latency streaming playback
+- Preset voice support for tts-stream
+- Stride-0 tensor serialization fix for streaming TTS
+
+### Qwen3 TTS Performance
+- Manual KV-cached loop for code predictor — avoids redundant recomputation
+- Regional `torch.compile` for code predictor decoder layers
+- CUDA graph support for speech tokenizer decoder
+
+### Qwen3 TTS Bug Fixes
+- Fix Qwen3 TTS 0.6B profile run hang
+- Cap `max_new_tokens` during profile run instead of short-circuiting
+- SDPA attention fallback when flash-attn is unavailable
+- Handle single tensor in audio frame metrics for non-streaming TTS
+
+### Speaker Embedding
+- Speaker embedding support for voice cloning (`speaker_embedding` parameter)
+- Speaker embedding examples and inference scripts
+
+---
+
 ## About
 
 [vLLM](https://github.com/vllm-project/vllm) was originally designed to support large language models for text-based autoregressive generation tasks. vLLM-Omni is a framework that extends its support for omni-modality model inference and serving:
