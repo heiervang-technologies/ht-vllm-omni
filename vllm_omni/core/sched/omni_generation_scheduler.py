@@ -359,9 +359,26 @@ class OmniGenerationScheduler(VLLMScheduler):
             finish_reason = None
             routed_experts = None
 
-            # Diffusion request: completes in one step; mark finished and free resources
+            # For streaming TTS, is_final=False means more chunks are coming.
+            # Only finish the request when is_final=True (default).
+            # After ZMQ deserialization, is_final may be a bool, list,
+            # or tensor depending on how it was serialized.
+            is_final = True
+            if pooler_output and isinstance(pooler_output, dict):
+                raw = pooler_output.get("is_final", True)
+                if isinstance(raw, (list, tuple)):
+                    is_final = bool(raw[0]) if raw else True
+                elif hasattr(raw, "item"):
+                    is_final = bool(raw.item())
+                else:
+                    is_final = bool(raw)
+
+            # Diffusion request: completes in one step; mark finished and free resources.
+            # Streaming requests stay alive until is_final=True.
             if request.status == RequestStatus.FINISHED_STOPPED or (
-                self.chunk_transfer_adapter is None and request.num_computed_tokens >= request.num_prompt_tokens
+                self.chunk_transfer_adapter is None
+                and request.num_computed_tokens >= request.num_prompt_tokens
+                and is_final
             ):
                 request.status = RequestStatus.FINISHED_STOPPED
                 # Optional: set a stop_reason for front-end clarity
