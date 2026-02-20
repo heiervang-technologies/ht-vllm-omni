@@ -81,6 +81,25 @@ class Qwen3TTSModelForGeneration(nn.Module):
             torch_dtype=torch.bfloat16,
             **attn_kwargs,
         )
+
+        # Compile code predictor decoder layers for reduced kernel launch overhead.
+        # Uses dynamic=True (not mode="reduce-overhead") because the autoregressive
+        # generate() loop has variable KV cache / sequence length shapes per step.
+        enforce_eager = getattr(getattr(vllm_config, "model_config", None), "enforce_eager", False)
+        if not enforce_eager:
+            try:
+                from vllm_omni.diffusion.compile import regionally_compile
+            except ImportError:
+                logger.info("regionally_compile not available, skipping code predictor compilation.")
+            else:
+                code_predictor_model = self.model.model.talker.code_predictor.model
+                code_predictor_model._repeated_blocks = ["Qwen3TTSDecoderLayer"]
+                try:
+                    regionally_compile(code_predictor_model, dynamic=True)
+                    logger.info("Code predictor decoder layers compiled with torch.compile.")
+                except RuntimeError as e:
+                    logger.warning("Failed to compile code predictor layers: %s. Continuing without compilation.", e)
+
         self.task_type = model_path.split("-")[-1].split("/")[0]
         # Mark that this model produces multimodal outputs
         self.have_multimodal_outputs = True
