@@ -90,6 +90,13 @@ def parse_args() -> argparse.Namespace:
         default=44100,
         help="Sample rate for output audio (Stable Audio uses 44100 Hz).",
     )
+    parser.add_argument(
+        "--quantization",
+        type=str,
+        default=None,
+        choices=["fp8"],
+        help="Quantization method for the diffusion transformer.",
+    )
     return parser.parse_args()
 
 
@@ -133,7 +140,7 @@ def main():
     print(f"{'=' * 60}\n")
 
     # Initialize Omni with Stable Audio model
-    omni = Omni(model=args.model)
+    omni = Omni(model=args.model, quantization=args.quantization)
 
     # Calculate audio end time
     audio_end_in_s = args.audio_start + args.audio_length

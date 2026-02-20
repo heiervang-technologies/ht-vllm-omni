@@ -1,33 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Quantization support for diffusion models.
+"""Diffusion model quantization support.
 
-This module provides a unified interface for quantizing diffusion transformers
-using various methods (FP8, etc.). It wraps vLLM's quantization infrastructure
-while allowing diffusion-model-specific defaults and optimizations.
-
-Example usage:
-    from vllm_omni.diffusion.quantization import (
-        get_diffusion_quant_config,
-        get_vllm_quant_config_for_layers,
-    )
-
-    # Create FP8 config for diffusion model
-    diff_config = get_diffusion_quant_config("fp8")
-
-    # Get vLLM config to pass to linear layers
-    vllm_config = get_vllm_quant_config_for_layers(diff_config)
-
-    # Use in model initialization
-    linear_layer = QKVParallelLinear(..., quant_config=vllm_config)
+Provides a thin wrapper around vLLM's quantization infrastructure so that
+diffusion transformer layers can opt-in to weight/activation quantization.
 """
+
+from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 
-from .base import DiffusionQuantizationConfig
-from .fp8 import DiffusionFp8Config
+from vllm_omni.diffusion.quantization.base import DiffusionQuantizationConfig
+from vllm_omni.diffusion.quantization.fp8 import DiffusionFp8Config
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import (
@@ -36,79 +22,69 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Registry of supported quantization methods
-# To add a new method, create a new config class and register it here
+# -----------------------------------------------------------------
+# Registry
+# -----------------------------------------------------------------
+
 _QUANT_CONFIG_REGISTRY: dict[str, type[DiffusionQuantizationConfig]] = {
     "fp8": DiffusionFp8Config,
 }
 
-SUPPORTED_QUANTIZATION_METHODS = list(_QUANT_CONFIG_REGISTRY.keys())
+SUPPORTED_QUANTIZATION_METHODS: list[str] = list(_QUANT_CONFIG_REGISTRY.keys())
+
+
+# -----------------------------------------------------------------
+# Factory
+# -----------------------------------------------------------------
 
 
 def get_diffusion_quant_config(
     quantization: str | None,
     **kwargs,
 ) -> DiffusionQuantizationConfig | None:
-    """Factory function to create quantization config for diffusion models.
+    """Create a ``DiffusionQuantizationConfig`` by method name.
 
     Args:
-        quantization: Quantization method name ("fp8", etc.) or None to disable
-        **kwargs: Method-specific parameters passed to the config constructor
+        quantization: Quantization method name (e.g. ``"fp8"``).
+            ``None`` means no quantization.
+        **kwargs: Extra keyword arguments forwarded to the config constructor
+            (e.g. ``activation_scheme``, ``ignored_layers``).
 
     Returns:
-        DiffusionQuantizationConfig instance or None if quantization is disabled
+        A config instance, or ``None`` when *quantization* is ``None``.
 
     Raises:
-        ValueError: If the quantization method is not supported
-
-    Example:
-        # Default FP8 with dynamic activation scaling
-        config = get_diffusion_quant_config("fp8")
-
-        # FP8 with custom parameters
-        config = get_diffusion_quant_config(
-            "fp8",
-            activation_scheme="static",
-            ignored_layers=["proj_out"],
-        )
+        ValueError: If the method name is not in the registry.
     """
-    if quantization is None or quantization.lower() == "none":
+    if quantization is None:
         return None
 
     quantization = quantization.lower()
     if quantization not in _QUANT_CONFIG_REGISTRY:
         raise ValueError(
-            f"Unknown quantization method: {quantization!r}. Supported methods: {SUPPORTED_QUANTIZATION_METHODS}"
+            f"Unknown diffusion quantization method {quantization!r}. "
+            f"Supported methods: {SUPPORTED_QUANTIZATION_METHODS}"
         )
 
     config_cls = _QUANT_CONFIG_REGISTRY[quantization]
-    logger.info("Creating diffusion quantization config: %s", quantization)
     return config_cls(**kwargs)
 
 
 def get_vllm_quant_config_for_layers(
     diffusion_quant_config: DiffusionQuantizationConfig | None,
 ) -> "QuantizationConfig | None":
-    """Get the vLLM QuantizationConfig to pass to linear layers.
+    """Extract the underlying vLLM ``QuantizationConfig`` for passing to layers.
 
-    This extracts the underlying vLLM config from a DiffusionQuantizationConfig,
-    which can then be passed to vLLM linear layers (QKVParallelLinear, etc.).
+    This is the bridge between the diffusion quantization world and
+    vLLM's parallel-linear layers which accept ``quant_config``.
 
     Args:
-        diffusion_quant_config: The diffusion quantization config, or None
+        diffusion_quant_config: A ``DiffusionQuantizationConfig`` instance,
+            or ``None`` for no quantization.
 
     Returns:
-        vLLM QuantizationConfig instance, or None if input is None
+        A vLLM ``QuantizationConfig`` (e.g. ``Fp8Config``), or ``None``.
     """
     if diffusion_quant_config is None:
         return None
     return diffusion_quant_config.get_vllm_quant_config()
-
-
-__all__ = [
-    "DiffusionQuantizationConfig",
-    "DiffusionFp8Config",
-    "get_diffusion_quant_config",
-    "get_vllm_quant_config_for_layers",
-    "SUPPORTED_QUANTIZATION_METHODS",
-]

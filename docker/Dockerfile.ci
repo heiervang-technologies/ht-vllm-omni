@@ -6,6 +6,11 @@ WORKDIR ${APP_DIR}
 
 COPY . .
 
+# Remove bundled CUDA compat driver so the host-injected driver (/lib/libcuda.so.1)
+# takes priority.  Without this, the container's libcuda.so 575 (CUDA 12.9) shadows
+# the host's driver 590 (CUDA 13.1) and cuInit() returns error 803.
+RUN rm -rf /usr/local/cuda/compat/libcuda.so* && ldconfig
+
 # Install system dependencies
 RUN apt-get update && \
     apt-get install -y ffmpeg sox libsox-fmt-all && \

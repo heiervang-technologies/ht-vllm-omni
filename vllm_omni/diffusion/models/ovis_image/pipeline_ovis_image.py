@@ -39,6 +39,7 @@ from vllm_omni.diffusion.distributed.cfg_parallel import CFGParallelMixin
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.ovis_image.ovis_image_transformer import OvisImageTransformer2DModel
+from vllm_omni.diffusion.quantization import get_vllm_quant_config_for_layers
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.model_executor.model_loader.weight_utils import download_weights_from_hf_specific
 
@@ -178,7 +179,8 @@ class OvisImagePipeline(nn.Module, CFGParallelMixin):
             model, subfolder="tokenizer", local_files_only=local_files_only
         )
 
-        self.transformer = OvisImageTransformer2DModel(od_config=od_config)
+        quant_config = get_vllm_quant_config_for_layers(od_config.quantization_config)
+        self.transformer = OvisImageTransformer2DModel(od_config=od_config, quant_config=quant_config)
 
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) if getattr(self, "vae", None) else 8
 

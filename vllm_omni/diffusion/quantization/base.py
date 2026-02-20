@@ -2,60 +2,50 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base class for diffusion model quantization configurations."""
 
+from __future__ import annotations
+
 from abc import ABC
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
 import torch
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.base_config import (
-        QuantizationConfig,
-    )
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+)
 
 
 class DiffusionQuantizationConfig(ABC):
-    """Base class for diffusion model quantization configurations.
+    """Abstract base class wrapping a vLLM ``QuantizationConfig``.
 
-    This provides a thin wrapper over vLLM's quantization configs,
-    allowing diffusion-model-specific defaults and future extensibility.
-
-    Subclasses should:
-        - Set quant_config_cls to the vLLM QuantizationConfig class
-        - Call super().__init__() after creating self._vllm_config
-        - Optionally override get_name() and get_min_capability() if needed
+    Subclasses set ``quant_config_cls`` to the concrete vLLM config class
+    (e.g. ``Fp8Config``) and build the underlying instance in ``__init__``.
     """
 
-    # Subclasses should set this to the vLLM QuantizationConfig class
-    quant_config_cls: ClassVar[type["QuantizationConfig"] | None] = None
+    quant_config_cls: ClassVar[type[QuantizationConfig]]
 
-    # The underlying vLLM config instance
-    _vllm_config: "QuantizationConfig | None" = None
+    # Underlying vLLM config created by subclass __init__
+    _vllm_config: QuantizationConfig
+
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
 
     @classmethod
     def get_name(cls) -> str:
-        """Return the quantization method name (e.g., 'fp8', 'int8').
+        return cls.quant_config_cls.get_name()
 
-        By default, delegates to the underlying vLLM config class.
-        """
-        if cls.quant_config_cls is not None:
-            return cls.quant_config_cls.get_name()
-        raise NotImplementedError("Subclass must set quant_config_cls or override get_name()")
-
-    def get_vllm_quant_config(self) -> "QuantizationConfig | None":
-        """Return the underlying vLLM QuantizationConfig for linear layers."""
+    def get_vllm_quant_config(self) -> QuantizationConfig:
+        """Return the underlying vLLM ``QuantizationConfig``."""
         return self._vllm_config
 
-    @classmethod
-    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
-        """Return supported activation dtypes."""
+    @staticmethod
+    def get_supported_act_dtypes() -> list[torch.dtype]:
         return [torch.bfloat16, torch.float16]
 
     @classmethod
     def get_min_capability(cls) -> int:
-        """Minimum GPU compute capability required.
-
-        By default, delegates to the underlying vLLM config class.
-        """
-        if cls.quant_config_cls is not None:
+        if hasattr(cls.quant_config_cls, "get_min_capability"):
             return cls.quant_config_cls.get_min_capability()
-        return 80  # Ampere default
+        return 80  # Ampere+
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(vllm_config={self._vllm_config!r})"

@@ -48,6 +48,7 @@ from vllm_omni.diffusion.models.glm_image.glm_image_transformer import (
     GlmImageKVCache,
     GlmImageTransformer2DModel,
 )
+from vllm_omni.diffusion.quantization import get_vllm_quant_config_for_layers
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.inputs.data import OmniTextPrompt
 from vllm_omni.model_executor.model_loader.weight_utils import (
@@ -315,7 +316,8 @@ class GlmImagePipeline(nn.Module):
 
         # Load transformer (DiT)
         logger.info("Loading GlmImageTransformer2DModel (DiT)...")
-        self.transformer = GlmImageTransformer2DModel(od_config=od_config)
+        quant_config = get_vllm_quant_config_for_layers(od_config.quantization_config)
+        self.transformer = GlmImageTransformer2DModel(od_config=od_config, quant_config=quant_config)
 
         # Weight sources for DiT loading
         self.weights_sources = [
