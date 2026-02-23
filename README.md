@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" src="https://raw.githubusercontent.com/vllm-project/vllm-omni/refs/heads/main/docs/source/logos/vllm-omni-logo.png">
-    <img alt="vllm-omni" src="https://raw.githubusercontent.com/vllm-project/vllm-omni/refs/heads/main/docs/source/logos/vllm-omni-logo.png" width=55%>
+    <source media="(prefers-color-scheme: dark)" src="docs/source/logos/ht-vllm-omni-logo.png">
+    <img alt="ht-vllm-omni" src="docs/source/logos/ht-vllm-omni-logo.png" width=55%>
   </picture>
 </p>
 <h3 align="center">
@@ -12,6 +12,24 @@ Easy, fast, and cheap omni-modality model serving for everyone
 | <a href="https://vllm-omni.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href="https://discuss.vllm.ai"><b>User Forum</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a> | <a href="docs/assets/WeChat.jpg"><b>WeChat</b></a> | <a href="https://arxiv.org/abs/2602.02204"><b>Paper</b></a> | <a href="https://docs.google.com/presentation/d/1qv4qMW1rKAqDREMXiUDLIgqqHQe7TDPj/edit?usp=sharing&ouid=110473603432222024453&rtpof=true&sd=true"><b>Slides</b></a> |
 </p>
 
+
+---
+
+## HT Fork Changes
+
+This is the [Heiervang Technologies](https://github.com/heiervang-technologies) fork of vLLM-Omni. The `ht` branch contains the following changes on top of upstream `main`:
+
+### Qwen3 TTS Streaming
+- HTTP-level streaming for TTS speech API (`/v1/audio/speech`)
+- `tts-stream` bash tool for low-latency streaming playback
+- Python streaming client with latency benchmarks
+
+### Qwen3 TTS Performance
+- CUDA graph support for speech tokenizer decoder *(cherry-picked from unmerged upstream PR [#1205](https://github.com/vllm-project/vllm-omni/pull/1205))*
+
+### Speaker Embedding
+- `speaker_embedding` API parameter for direct voice cloning (bypasses ref_audio)
+- Speaker embedding extraction and SLERP interpolation example
 
 ---
 
