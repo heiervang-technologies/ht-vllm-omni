@@ -60,12 +60,11 @@ def load_speaker_encoder(model_path: str, device: str = "cpu") -> torch.nn.Modul
     # Register the config class so AutoConfig can resolve it
     sys.path.insert(0, os.path.dirname(__file__))
     try:
-        from vllm_omni.model_executor.models.qwen3_tts.modeling_qwen3_tts import (
-            Qwen3TTSSpeakerEncoder,
-        )
-
         from vllm_omni.model_executor.models.qwen3_tts.configuration_qwen3_tts import (
             Qwen3TTSConfig,
+        )
+        from vllm_omni.model_executor.models.qwen3_tts.qwen3_tts_talker import (
+            Qwen3TTSSpeakerEncoder,
         )
 
         AutoConfig.register("qwen3_tts", Qwen3TTSConfig)
