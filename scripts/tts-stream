@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Stream TTS audio and play it in real-time with minimal latency.
+#
+# Usage:
+#   tts-stream "Hello, this is a test."
+#   tts-stream --voice Vivian "Preset voice."
+#   tts-stream --ref ~/voice.wav "Clone this voice."
+#   tts-stream --save output.wav "Save and play."
+#   echo "piped text" | tts-stream
+#
+# Preset voices: Vivian, Ryan, Dylan, Aiden, Eric, Uncle_Fu, Serena, Ono_Anna, Sohee
+#
+# Requires: curl, sox (play), python3
+
+set -euo pipefail
+
+URL="${TTS_URL:-http://localhost:8000}"
+MODEL="${TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
+REF_AUDIO="${TTS_REF_AUDIO:-}"
+VOICE="${TTS_VOICE:-}"
+SAVE=""
+TEXT=""
+
+usage() {
+  echo "Usage: tts-stream [OPTIONS] TEXT"
+  echo ""
+  echo "Options:"
+  echo "  --voice NAME     Preset voice (Vivian, Ryan, Dylan, Aiden, Eric,"
+  echo "                   Uncle_Fu, Serena, Ono_Anna, Sohee)"
+  echo "  --ref PATH       Reference audio WAV for voice cloning (Base model)"
+  echo "  --url URL        Server URL (default: \$TTS_URL or http://localhost:8000)"
+  echo "  --model NAME     Model name (default: \$TTS_MODEL)"
+  echo "  --save PATH      Save audio to file (.wav or .pcm)"
+  echo "  -h, --help       Show this help"
+  echo ""
+  echo "Environment:"
+  echo "  TTS_URL          Default server URL"
+  echo "  TTS_MODEL        Default model name"
+  echo "  TTS_VOICE        Default preset voice"
+  echo "  TTS_REF_AUDIO    Default reference audio path"
+  exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --url)   URL="$2"; shift 2 ;;
+    --model) MODEL="$2"; shift 2 ;;
+    --voice) VOICE="$2"; shift 2 ;;
+    --ref)   REF_AUDIO="$2"; shift 2 ;;
+    --save)  SAVE="$2"; shift 2 ;;
+    -h|--help) usage ;;
+    --) shift; TEXT="$*"; break ;;
+    -*) echo "Unknown option: $1" >&2; exit 1 ;;
+    *)  TEXT="$*"; break ;;
+  esac
+done
+
+# Read from stdin if no text argument
+if [[ -z "$TEXT" ]]; then
+  TEXT="$(cat)"
+fi
+
+if [[ -z "$TEXT" ]]; then
+  echo "Error: no text provided" >&2
+  exit 1
+fi
+
+# Write request JSON to temp file.
+# Done in Python because ref_audio base64 can exceed shell ARG_MAX.
+TMPBODY=$(mktemp /tmp/tts-stream-XXXXXX.json)
+trap 'rm -f "$TMPBODY"' EXIT
+
+python3 - "$TEXT" "$MODEL" "$VOICE" "$REF_AUDIO" "$TMPBODY" <<'PYEOF'
+import base64, json, struct, sys, pathlib
+
+text, model, voice, ref_path, out_path = sys.argv[1:6]
+
+body = {
+    "input": text,
+    "model": model,
+    "response_format": "pcm",
+    "stream": True,
+}
+
+if voice:
+    # CustomVoice mode: use a preset speaker
+    body["task_type"] = "CustomVoice"
+    body["voice"] = voice
+elif ref_path and pathlib.Path(ref_path).is_file():
+    # Base mode: voice cloning from reference audio
+    raw = pathlib.Path(ref_path).read_bytes()
+    body["task_type"] = "Base"
+    body["ref_audio"] = "data:audio/wav;base64," + base64.b64encode(raw).decode()
+    body["x_vector_only_mode"] = True
+else:
+    # Base mode: silent placeholder (will produce output but generic voice)
+    sr, ns = 16000, 16000
+    hdr = (b"RIFF" + struct.pack("<I", 36 + ns * 2)
+           + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, sr, sr * 2, 2, 16)
+           + b"data" + struct.pack("<I", ns * 2))
+    body["task_type"] = "Base"
+    body["ref_audio"] = "data:audio/wav;base64," + base64.b64encode(hdr + b"\x00" * ns * 2).decode()
+    body["x_vector_only_mode"] = True
+
+pathlib.Path(out_path).write_text(json.dumps(body))
+PYEOF
+
+T_START=$(date +%s%3N)
+
+if [[ -n "$SAVE" ]]; then
+  curl -sN -X POST "${URL}/v1/audio/speech" \
+    -H "Content-Type: application/json" \
+    -d @"$TMPBODY" | tee "$SAVE" | \
+    play -t raw -r 24000 -e signed-integer -b 16 -c 1 - 2>/dev/null
+else
+  curl -sN -X POST "${URL}/v1/audio/speech" \
+    -H "Content-Type: application/json" \
+    -d @"$TMPBODY" | \
+    play -t raw -r 24000 -e signed-integer -b 16 -c 1 - 2>/dev/null
+fi
+
+T_END=$(date +%s%3N)
+ELAPSED=$(( T_END - T_START ))
+echo "[tts-stream] done in ${ELAPSED}ms" >&2
