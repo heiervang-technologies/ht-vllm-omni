@@ -41,7 +41,7 @@ class OpenAICreateSpeechRequest(BaseModel):
     )
     ref_audio: str | None = Field(
         default=None,
-        description="Reference audio for voice cloning (Base task). URL, base64, or file path.",
+        description="Reference audio for voice cloning (Base task). HTTP/HTTPS URL or base64 data URL.",
     )
     ref_text: str | None = Field(
         default=None,
