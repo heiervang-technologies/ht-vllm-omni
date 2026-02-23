@@ -1,4 +1,4 @@
-# Copyright 2026 The Alibaba Qwen team.
+# Copyright 2026 Heiervang Technologies.
 # SPDX-License-Identifier: Apache-2.0
 """
 CUDA Graph wrapper for Qwen3TTSTokenizerV2Decoder.
@@ -100,16 +100,8 @@ class CUDAGraphDecoderWrapper:
 
         logger.info(f"Starting CUDA Graph warmup for {len(self.capture_sizes)} sizes: {self.capture_sizes}")
 
-        # Warmup runs to ensure CUDA memory is allocated
-        for size in self.capture_sizes:
-            dummy_codes = torch.zeros(1, self.num_quantizers, size, dtype=dtype, device=device)
-            with torch.no_grad():
-                _ = self.decoder(dummy_codes)
-
-        # Synchronize before capturing
-        torch.cuda.synchronize(device)
-
-        # Capture graphs for each size
+        # Capture graphs for each size (_capture_graph_for_size does its own
+        # warmup run before capture, so no separate warmup loop is needed)
         for size in self.capture_sizes:
             try:
                 self._capture_graph_for_size(size, device, dtype)

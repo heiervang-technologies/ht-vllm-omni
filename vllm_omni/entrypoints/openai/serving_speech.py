@@ -155,8 +155,19 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 return "'speaker_embedding' and 'ref_audio' are mutually exclusive"
             if not request.speaker_embedding:
                 return "'speaker_embedding' must be a non-empty list of floats"
-            if len(request.speaker_embedding) < 64 or len(request.speaker_embedding) > 8192:
-                return f"'speaker_embedding' length {len(request.speaker_embedding)} is outside valid range [64, 8192]"
+            emb_len = len(request.speaker_embedding)
+            # ECAPA-TDNN produces 1024-dim (0.6B) or 2048-dim (1.7B)
+            expected_dims = {1024, 2048}
+            if emb_len < 64 or emb_len > 8192:
+                return f"'speaker_embedding' length {emb_len} is outside valid range [64, 8192]"
+            if emb_len not in expected_dims:
+                logger.warning(
+                    "speaker_embedding has %d dimensions; expected %s "
+                    "(from ECAPA-TDNN speaker encoder). Non-standard "
+                    "dimensions may produce degraded audio quality.",
+                    emb_len,
+                    " or ".join(str(d) for d in sorted(expected_dims)),
+                )
 
         # Validate Base task requirements
         if task_type == "Base":
@@ -410,8 +421,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
             # Streaming accumulates chunks as a list; concat first.
             if isinstance(audio_tensor, list):
-                import torch
-
                 audio_tensor = torch.cat(audio_tensor, dim=-1)
             # Convert tensor to numpy
             if hasattr(audio_tensor, "float"):
@@ -499,9 +508,12 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 new_tensors = audio_data[chunks_yielded:]
                 chunks_yielded = len(audio_data)
             else:
-                # Single tensor or first chunk
-                new_tensors = [audio_data]
-                chunks_yielded = 1
+                # Single tensor — only yield on the first occurrence
+                if chunks_yielded == 0:
+                    new_tensors = [audio_data]
+                    chunks_yielded = 1
+                else:
+                    new_tensors = []
 
             for audio_tensor in new_tensors:
                 # Convert to numpy - after ZMQ deserialization tensors
@@ -559,9 +571,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if audio_output is None:
             return None
 
-        # Normalise: some models use "model_outputs" instead of "audio"
+        # Normalise: some models use "model_outputs" instead of "audio".
+        # Use a shallow copy to avoid mutating the original output dict,
+        # which may be re-examined during streaming iteration.
         if "model_outputs" in audio_output and "audio" not in audio_output:
-            audio_output["audio"] = audio_output.pop("model_outputs")
+            audio_output = {**audio_output, "audio": audio_output["model_outputs"]}
         if "audio" in audio_output:
             return audio_output
         return None
