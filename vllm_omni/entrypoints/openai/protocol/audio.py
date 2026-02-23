@@ -51,6 +51,10 @@ class OpenAICreateSpeechRequest(BaseModel):
         default=None,
         description="Use speaker embedding only without in-context learning (Base task)",
     )
+    stream: bool = Field(
+        default=False,
+        description="Stream audio chunks progressively as they are generated.",
+    )
     max_new_tokens: int | None = Field(
         default=None,
         description="Maximum tokens to generate",
