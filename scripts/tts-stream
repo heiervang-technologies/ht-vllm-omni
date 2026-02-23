@@ -108,10 +108,19 @@ PYEOF
 T_START=$(date +%s%3N)
 
 if [[ -n "$SAVE" ]]; then
+  TMPPCM=$(mktemp /tmp/tts-stream-pcm-XXXXXX.raw)
+  trap 'rm -f "$TMPBODY" "$TMPPCM"' EXIT
   curl -sN -X POST "${URL}/v1/audio/speech" \
     -H "Content-Type: application/json" \
-    -d @"$TMPBODY" | tee "$SAVE" | \
+    -d @"$TMPBODY" | tee "$TMPPCM" | \
     play -t raw -r 24000 -e signed-integer -b 16 -c 1 - 2>/dev/null
+  # Convert raw PCM to WAV if .wav extension requested
+  if [[ "$SAVE" == *.wav ]]; then
+    sox -t raw -r 24000 -e signed-integer -b 16 -c 1 "$TMPPCM" "$SAVE"
+  else
+    mv "$TMPPCM" "$SAVE"
+  fi
+  echo "[tts-stream] saved to $SAVE" >&2
 else
   curl -sN -X POST "${URL}/v1/audio/speech" \
     -H "Content-Type: application/json" \
