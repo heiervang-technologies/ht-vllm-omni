@@ -182,12 +182,25 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             if self.supported_speakers and request.voice not in self.supported_speakers:
                 return f"Invalid speaker '{request.voice}'. Supported: {', '.join(sorted(self.supported_speakers))}"
 
+        # Validate speaker_embedding constraints
+        if request.speaker_embedding is not None:
+            if task_type != "Base":
+                return "'speaker_embedding' is only valid for Base task"
+            if request.ref_audio is not None:
+                return "'speaker_embedding' and 'ref_audio' are mutually exclusive"
+            if not request.speaker_embedding:
+                return "'speaker_embedding' must be a non-empty list of floats"
+            if len(request.speaker_embedding) < 64 or len(request.speaker_embedding) > 8192:
+                return f"'speaker_embedding' length {len(request.speaker_embedding)} is outside valid range [64, 8192]"
+
         # Validate Base task requirements
         if task_type == "Base":
-            if request.ref_audio is None:
-                return "Base task requires 'ref_audio' for voice cloning"
+            if request.ref_audio is None and request.speaker_embedding is None:
+                return "Base task requires 'ref_audio' or 'speaker_embedding' for voice cloning"
             # Validate ref_audio format
-            if not (request.ref_audio.startswith(("http://", "https://")) or request.ref_audio.startswith("data:")):
+            if request.ref_audio is not None and not (
+                request.ref_audio.startswith(("http://", "https://")) or request.ref_audio.startswith("data:")
+            ):
                 return "ref_audio must be a URL (http/https) or base64 data URL (data:...)"
 
         # Validate cross-parameter dependencies
@@ -370,7 +383,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         # Voice clone: ref_audio resolved in create_speech(), not here.
         if request.ref_text is not None:
             params["ref_text"] = [request.ref_text]
-        if request.x_vector_only_mode is not None:
+        if request.speaker_embedding is not None:
+            params["speaker_embedding"] = [request.speaker_embedding]
+            # speaker_embedding implies x_vector_only_mode
+            params["x_vector_only_mode"] = [True]
+        elif request.x_vector_only_mode is not None:
             params["x_vector_only_mode"] = [request.x_vector_only_mode]
 
         # Generation parameters
