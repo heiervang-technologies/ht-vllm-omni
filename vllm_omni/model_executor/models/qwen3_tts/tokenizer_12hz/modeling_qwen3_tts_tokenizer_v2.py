@@ -898,9 +898,7 @@ class Qwen3TTSTokenizerV2Decoder(Qwen3TTSTokenizerV2DecoderPreTrainedModel):
     def chunked_decode(self, codes, chunk_size=300, left_context_size=25):
         # Use CUDA graph if enabled
         if self._cudagraph_enabled and self._cudagraph_wrapper is not None:
-            return self._cudagraph_wrapper.chunked_decode_with_cudagraph(
-                codes, chunk_size, left_context_size
-            )
+            return self._cudagraph_wrapper.chunked_decode_with_cudagraph(codes, chunk_size, left_context_size)
 
         # Original implementation (eager mode)
         wavs = []

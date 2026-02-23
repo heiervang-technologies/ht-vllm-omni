@@ -8,9 +8,9 @@ from typing import Any
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
-import torch
 import numpy as np
 import soundfile as sf
+import torch
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
@@ -183,10 +183,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if request.stream:
             fmt = (request.response_format or "wav").lower()
             if fmt not in ("wav", "pcm"):
-                return (
-                    f"Streaming only supports 'wav' and 'pcm' response formats, "
-                    f"got '{fmt}'"
-                )
+                return f"Streaming only supports 'wav' and 'pcm' response formats, got '{fmt}'"
             if request.speed is not None and request.speed != 1.0:
                 return "Streaming does not support speed adjustment (speed must be 1.0)"
 
@@ -284,12 +281,12 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             # Inject as voice_clone_prompt.ref_spk_embedding — the talker's
             # _build_prompt_embeds reads the embedding from this dict, not
             # from a top-level key.
-            spk_tensor = torch.tensor(
-                request.speaker_embedding, dtype=torch.bfloat16
-            )
-            params["voice_clone_prompt"] = [{
-                "ref_spk_embedding": spk_tensor,
-            }]
+            spk_tensor = torch.tensor(request.speaker_embedding, dtype=torch.bfloat16)
+            params["voice_clone_prompt"] = [
+                {
+                    "ref_spk_embedding": spk_tensor,
+                }
+            ]
             # speaker_embedding implies x_vector_only_mode
             params["x_vector_only_mode"] = [True]
         elif request.x_vector_only_mode is not None:

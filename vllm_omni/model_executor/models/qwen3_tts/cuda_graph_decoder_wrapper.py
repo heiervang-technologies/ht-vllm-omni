@@ -9,7 +9,6 @@ reducing kernel launch overhead during inference.
 
 import torch
 from torch.cuda import CUDAGraph
-from typing import Dict, List, Optional
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -37,7 +36,7 @@ class CUDAGraphDecoderWrapper:
     def __init__(
         self,
         decoder: torch.nn.Module,
-        capture_sizes: Optional[List[int]] = None,
+        capture_sizes: list[int] | None = None,
         num_quantizers: int = 8,
         enabled: bool = True,
     ):
@@ -56,14 +55,14 @@ class CUDAGraphDecoderWrapper:
         self.enabled = enabled
 
         # CUDA graph storage
-        self.graphs: Dict[int, CUDAGraph] = {}
-        self.static_inputs: Dict[int, torch.Tensor] = {}
-        self.static_outputs: Dict[int, torch.Tensor] = {}
+        self.graphs: dict[int, CUDAGraph] = {}
+        self.static_inputs: dict[int, torch.Tensor] = {}
+        self.static_outputs: dict[int, torch.Tensor] = {}
 
         self._warmed_up = False
         self._device = None
 
-    def _get_padded_size(self, actual_size: int) -> Optional[int]:
+    def _get_padded_size(self, actual_size: int) -> int | None:
         """
         Get the smallest capture size that can accommodate the actual size.
 
@@ -103,11 +102,7 @@ class CUDAGraphDecoderWrapper:
 
         # Warmup runs to ensure CUDA memory is allocated
         for size in self.capture_sizes:
-            dummy_codes = torch.zeros(
-                1, self.num_quantizers, size,
-                dtype=dtype,
-                device=device
-            )
+            dummy_codes = torch.zeros(1, self.num_quantizers, size, dtype=dtype, device=device)
             with torch.no_grad():
                 _ = self.decoder(dummy_codes)
 
@@ -126,12 +121,7 @@ class CUDAGraphDecoderWrapper:
         self._warmed_up = True
         logger.info(f"CUDA Graph warmup complete. Captured {len(self.graphs)} graphs.")
 
-    def _capture_graph_for_size(
-        self,
-        size: int,
-        device: torch.device,
-        dtype: torch.dtype
-    ):
+    def _capture_graph_for_size(self, size: int, device: torch.device, dtype: torch.dtype):
         """
         Capture a CUDA graph for a specific input size.
 
@@ -141,11 +131,7 @@ class CUDAGraphDecoderWrapper:
             dtype: Input dtype
         """
         # Create static input buffer
-        static_input = torch.zeros(
-            1, self.num_quantizers, size,
-            dtype=dtype,
-            device=device
-        )
+        static_input = torch.zeros(1, self.num_quantizers, size, dtype=dtype, device=device)
 
         # Warmup run (required before capture)
         with torch.no_grad():
@@ -206,10 +192,7 @@ class CUDAGraphDecoderWrapper:
         return output[..., :actual_output_len].clone()
 
     def chunked_decode_with_cudagraph(
-        self,
-        codes: torch.Tensor,
-        chunk_size: int = 300,
-        left_context_size: int = 25
+        self, codes: torch.Tensor, chunk_size: int = 300, left_context_size: int = 25
     ) -> torch.Tensor:
         """
         Chunked decode with CUDA graph acceleration.
@@ -248,7 +231,7 @@ class CUDAGraphDecoderWrapper:
 
 def patch_decoder_with_cudagraph(
     decoder: torch.nn.Module,
-    capture_sizes: Optional[List[int]] = None,
+    capture_sizes: list[int] | None = None,
     enabled: bool = True,
 ) -> CUDAGraphDecoderWrapper:
     """
@@ -273,7 +256,7 @@ def patch_decoder_with_cudagraph(
         model.speech_tokenizer.decoder.chunked_decode = wrapper.chunked_decode_with_cudagraph
     """
     # Get num_quantizers from decoder config
-    num_quantizers = getattr(decoder.config, 'num_quantizers', 8)
+    num_quantizers = getattr(decoder.config, "num_quantizers", 8)
 
     wrapper = CUDAGraphDecoderWrapper(
         decoder=decoder,
