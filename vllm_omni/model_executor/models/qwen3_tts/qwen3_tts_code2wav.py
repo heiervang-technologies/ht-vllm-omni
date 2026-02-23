@@ -106,7 +106,23 @@ class Qwen3TTSCode2Wav(nn.Module):
         self._num_quantizers = num_q
         self._decode_upsample_rate = upsample
         self._output_sample_rate = out_sr
+
+        # Enable CUDA graph for speech tokenizer decoder if on CUDA
+        self._enable_decoder_cudagraph(tok)
+
         return tok
+
+    def _enable_decoder_cudagraph(self, tok: Qwen3TTSTokenizer) -> None:
+        """Enable CUDA graph capture for the speech tokenizer decoder."""
+        try:
+            if tok.model is not None and hasattr(tok.model, "decoder"):
+                decoder = tok.model.decoder
+                device = self._module_device(decoder)
+                if device.type == "cuda" and hasattr(decoder, "enable_cudagraph"):
+                    decoder.enable_cudagraph(capture_sizes=[25, 50, 100, 150, 200, 250, 300])
+                    logger.info("CUDA Graph enabled for speech tokenizer decoder")
+        except Exception as e:
+            logger.warning(f"Failed to enable CUDA Graph for decoder: {e}")
 
     def embed_input_ids(self, input_ids: torch.Tensor, **_: Any) -> torch.Tensor:
         # This stage ignores token embeddings. Keep a stable dummy embedding for vLLM runner.
