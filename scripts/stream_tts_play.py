@@ -106,12 +106,18 @@ def stream_and_play(
         player = subprocess.Popen(
             [
                 "sox",
-                "-t", "raw",
-                "-r", str(SAMPLE_RATE),
-                "-e", "signed-integer",
-                "-b", str(BIT_DEPTH),
-                "-c", str(CHANNELS),
-                "-", "-d",
+                "-t",
+                "raw",
+                "-r",
+                str(SAMPLE_RATE),
+                "-e",
+                "signed-integer",
+                "-b",
+                str(BIT_DEPTH),
+                "-c",
+                str(CHANNELS),
+                "-",
+                "-d",
             ],
             stdin=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -131,7 +137,7 @@ def stream_and_play(
         resp.raise_for_status()
 
         t_response = time.monotonic()
-        print(f"[timing] HTTP response headers: {(t_response - t_start)*1000:.0f}ms")
+        print(f"[timing] HTTP response headers: {(t_response - t_start) * 1000:.0f}ms")
 
         for chunk in resp.iter_content(chunk_size=4096):
             if not chunk:
@@ -182,13 +188,13 @@ def stream_and_play(
     total_bytes = len(all_pcm)
     audio_duration = total_bytes / (SAMPLE_RATE * BYTES_PER_SAMPLE) if total_bytes > 0 else 0
 
-    print(f"\n[summary]")
+    print("\n[summary]")
     print(f"  chunks received: {chunk_count}")
     print(f"  total PCM bytes: {total_bytes}")
     print(f"  audio duration:  {audio_duration:.2f}s")
-    print(f"  total wall time: {(t_end - t_start)*1000:.0f}ms")
+    print(f"  total wall time: {(t_end - t_start) * 1000:.0f}ms")
     if first_chunk_time:
-        print(f"  time to first audio: {(first_chunk_time - t_start)*1000:.0f}ms")
+        print(f"  time to first audio: {(first_chunk_time - t_start) * 1000:.0f}ms")
         if audio_duration > 0:
             print(f"  realtime factor: {(t_end - t_start) / audio_duration:.2f}x")
 
