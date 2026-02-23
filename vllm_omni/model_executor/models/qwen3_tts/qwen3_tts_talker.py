@@ -1100,6 +1100,17 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         else:
             tok.device = dev
         self._speech_tokenizer = tok
+
+        # Enable CUDA graph for speech tokenizer decoder if on CUDA
+        try:
+            if tok.model is not None and hasattr(tok.model, "decoder"):
+                decoder = tok.model.decoder
+                if dev.type == "cuda" and hasattr(decoder, "enable_cudagraph"):
+                    decoder.enable_cudagraph(capture_sizes=[25, 50, 100, 150, 200, 250, 300])
+                    logger.info("CUDA Graph enabled for talker speech tokenizer decoder")
+        except Exception as e:
+            logger.warning(f"Failed to enable CUDA Graph for talker decoder: {e}")
+
         return tok
 
     def _encode_ref_audio_to_code(self, wav: np.ndarray, sr: int) -> torch.Tensor:
