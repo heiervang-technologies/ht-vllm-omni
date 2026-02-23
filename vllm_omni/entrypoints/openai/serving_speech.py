@@ -158,15 +158,12 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             emb_len = len(request.speaker_embedding)
             # ECAPA-TDNN produces 1024-dim (0.6B) or 2048-dim (1.7B)
             expected_dims = {1024, 2048}
-            if emb_len < 64 or emb_len > 8192:
-                return f"'speaker_embedding' length {emb_len} is outside valid range [64, 8192]"
             if emb_len not in expected_dims:
                 logger.warning(
-                    "speaker_embedding has %d dimensions; expected %s "
-                    "(from ECAPA-TDNN speaker encoder). Non-standard "
-                    "dimensions may produce degraded audio quality.",
+                    "speaker_embedding has %d dimensions; expected 1024 "
+                    "(0.6B model) or 2048 (1.7B model). Wrong dimensions "
+                    "will likely result in errors or degraded quality.",
                     emb_len,
-                    " or ".join(str(d) for d in sorted(expected_dims)),
                 )
 
         # Validate Base task requirements
