@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
+import torch
 import numpy as np
 import soundfile as sf
 from fastapi import Request
@@ -178,6 +179,17 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if task_type == "VoiceDesign" and not request.instructions:
             return "VoiceDesign task requires 'instructions' to describe the voice"
 
+        # Validate streaming constraints
+        if request.stream:
+            fmt = (request.response_format or "wav").lower()
+            if fmt not in ("wav", "pcm"):
+                return (
+                    f"Streaming only supports 'wav' and 'pcm' response formats, "
+                    f"got '{fmt}'"
+                )
+            if request.speed is not None and request.speed != 1.0:
+                return "Streaming does not support speed adjustment (speed must be 1.0)"
+
         # Validate instructions length
         if request.instructions and len(request.instructions) > _TTS_MAX_INSTRUCTIONS_LENGTH:
             return f"Instructions too long (max {_TTS_MAX_INSTRUCTIONS_LENGTH} characters)"
@@ -269,7 +281,15 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if request.ref_text is not None:
             params["ref_text"] = [request.ref_text]
         if request.speaker_embedding is not None:
-            params["speaker_embedding"] = [request.speaker_embedding]
+            # Inject as voice_clone_prompt.ref_spk_embedding — the talker's
+            # _build_prompt_embeds reads the embedding from this dict, not
+            # from a top-level key.
+            spk_tensor = torch.tensor(
+                request.speaker_embedding, dtype=torch.bfloat16
+            )
+            params["voice_clone_prompt"] = [{
+                "ref_spk_embedding": spk_tensor,
+            }]
             # speaker_embedding implies x_vector_only_mode
             params["x_vector_only_mode"] = [True]
         elif request.x_vector_only_mode is not None:

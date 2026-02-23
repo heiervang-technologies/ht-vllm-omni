@@ -9,7 +9,7 @@ reducing kernel launch overhead during inference.
 
 import torch
 from torch.cuda import CUDAGraph
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
