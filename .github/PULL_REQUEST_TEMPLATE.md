@@ -16,6 +16,7 @@ PLEASE FILL IN THE PR DESCRIPTION HERE ENSURING ALL CHECKLIST ITEMS (AT THE BOTT
 - [ ] The test results. Please pasting the results comparison before and after, or e2e results.
 - [ ] (Optional) The necessary documentation update, such as updating `supported_models.md` and `examples` for a new model. **Please run `mkdocs serve` to sync the documentation editions to `./docs`.**
 - [ ] (Optional) Release notes update. If your change is user facing, please update the release notes draft.
+- [ ] (HT fork) If this PR adds or changes HT-specific functionality, update the **HT Fork Changes** section in `README.md`.
 </details>
 
 **BEFORE SUBMITTING, PLEASE READ <https://github.com/vllm-project/vllm-omni/blob/main/CONTRIBUTING.md>** (anything written below this line will be removed by GitHub Actions)
