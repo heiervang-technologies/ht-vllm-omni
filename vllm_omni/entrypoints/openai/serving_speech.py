@@ -19,6 +19,7 @@ from vllm.utils import random_uuid
 
 from vllm_omni.entrypoints.openai.audio_utils_mixin import AudioMixin
 from vllm_omni.entrypoints.openai.protocol.audio import (
+    AudioResponse,
     CreateAudio,
     OpenAICreateSpeechRequest,
 )
