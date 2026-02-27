@@ -583,21 +583,21 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         chunks_yielded = 0  # Cursor: how many audio chunks we've already sent
 
         async for output in generator:
-            audio_output = self._extract_audio_output(output)
-            if audio_output is None:
+            audio_output, audio_key = self._extract_audio_output(output)
+            if audio_key is None:
                 continue
 
-            sr = audio_output.get("sr", 24000)
-            if hasattr(sr, "item"):
-                sr = sr.item()
-            elif isinstance(sr, (list, tuple)):
-                sr = sr[0] if sr else 24000
-            sample_rate = int(sr)
+            sr_raw = audio_output.get("sr", 24000)
+            if isinstance(sr_raw, list) and sr_raw:
+                sr_raw = sr_raw[-1]
+            if hasattr(sr_raw, "item"):
+                sr_raw = sr_raw.item()
+            sample_rate = int(sr_raw)
 
             # The output processor accumulates audio tensors in a list.
             # First output: audio_data is a single tensor.
             # Subsequent outputs: audio_data is [tensor1, tensor2, ...].
-            audio_data = audio_output["audio"]
+            audio_data = audio_output[audio_key]
             if isinstance(audio_data, list) and audio_data and hasattr(audio_data[0], "float"):
                 # List of tensors from accumulation - get only new ones
                 new_tensors = audio_data[chunks_yielded:]
@@ -637,47 +637,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     header_sent = True
 
                 yield pcm_chunk
-
-    @staticmethod
-    def _extract_audio_output(output: OmniRequestOutput) -> dict | None:
-        """Extract audio dict from OmniRequestOutput, trying multiple locations.
-
-        Normalises the audio key to ``"audio"`` so callers can always use
-        ``audio_output["audio"]``.
-        """
-        candidates: list[dict | None] = []
-
-        # Location 1: OmniRequestOutput property / direct attribute
-        if hasattr(output, "multimodal_output"):
-            candidates.append(output.multimodal_output)
-
-        # Location 2 & 3: inside request_output
-        ro = getattr(output, "request_output", None)
-        if ro is not None:
-            candidates.append(getattr(ro, "multimodal_output", None))
-            for co in getattr(ro, "outputs", []):
-                candidates.append(getattr(co, "multimodal_output", None))
-
-        # Pick the first candidate that is a non-empty dict with audio data
-        audio_output = None
-        for candidate in candidates:
-            if not isinstance(candidate, dict) or not candidate:
-                continue
-            if "audio" in candidate or "model_outputs" in candidate:
-                audio_output = candidate
-                break
-
-        if audio_output is None:
-            return None
-
-        # Normalise: some models use "model_outputs" instead of "audio".
-        # Use a shallow copy to avoid mutating the original output dict,
-        # which may be re-examined during streaming iteration.
-        if "model_outputs" in audio_output and "audio" not in audio_output:
-            audio_output = {**audio_output, "audio": audio_output["model_outputs"]}
-        if "audio" in audio_output:
-            return audio_output
-        return None
 
 
 _STREAM_MEDIA_TYPES = {
