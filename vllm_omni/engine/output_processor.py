@@ -79,11 +79,17 @@ class OmniRequestState(RequestState):
             if self.mm_accumulated is None:
                 self.mm_accumulated = incoming
             else:
-                # Merge keys; accumulate tensors in lists for deferred concatenation
+                # Merge keys; accumulate tensors in lists for deferred concatenation.
+                # Scalar (0-dim) tensors are metadata (e.g. sr, is_final) —
+                # just keep the latest value instead of accumulating.
                 for k, v in incoming.items():
                     if k not in self.mm_accumulated:
                         self.mm_accumulated[k] = v
                     else:
+                        # Scalar tensors: overwrite with latest value
+                        if isinstance(v, torch.Tensor) and v.ndim == 0:
+                            self.mm_accumulated[k] = v
+                            continue
                         existing = self.mm_accumulated[k]
                         if isinstance(v, torch.Tensor) and isinstance(existing, torch.Tensor):
                             # Use list accumulation to avoid O(n²) repeated concatenation
@@ -95,6 +101,8 @@ class OmniRequestState(RequestState):
                             # Merge nested dicts with list accumulation for tensors
                             for sk, sv in v.items():
                                 if sk not in existing:
+                                    existing[sk] = sv
+                                elif isinstance(sv, torch.Tensor) and sv.ndim == 0:
                                     existing[sk] = sv
                                 elif isinstance(sv, torch.Tensor) and isinstance(existing[sk], torch.Tensor):
                                     existing[sk] = [existing[sk], sv]
@@ -115,6 +123,11 @@ class OmniRequestState(RequestState):
         try:
             for k, v in self.mm_accumulated.items():
                 if isinstance(v, list) and v and isinstance(v[0], torch.Tensor):
+                    # Skip scalar (0-dim) tensor lists — these are metadata
+                    # (e.g. sr, is_final) that should just keep the last value.
+                    if v[0].ndim == 0:
+                        self.mm_accumulated[k] = v[-1]
+                        continue
                     try:
                         if k == "audio":
                             # When the audio tensor shape is inconsistent, torch.cat will fail.
@@ -129,6 +142,9 @@ class OmniRequestState(RequestState):
                 elif isinstance(v, dict):
                     for sk, sv in v.items():
                         if isinstance(sv, list) and sv and isinstance(sv[0], torch.Tensor):
+                            if sv[0].ndim == 0:
+                                v[sk] = sv[-1]
+                                continue
                             try:
                                 v[sk] = torch.cat(sv, dim=0)
                             except Exception:
