@@ -351,17 +351,43 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
     def _extract_audio_output(res) -> tuple[dict | None, str | None]:
         """Return (audio_output dict, audio key) or (None, None).
 
+        Audio data is attached to CompletionOutput.multimodal_output inside
+        request_output.outputs[] by the output processor.  This method checks
+        there first (via the OmniRequestOutput property, then via a direct
+        walk of outputs[]) before falling back to top-level attributes.
+
         Returns the raw dict so callers can apply their own extraction strategy:
         streaming needs per-chunk delta slicing; non-streaming needs full concatenation.
         """
+        _AUDIO_KEYS = ("audio", "model_outputs")
+
+        def _find_key(mm: dict) -> str | None:
+            for k in _AUDIO_KEYS:
+                if k in mm:
+                    return k
+            return None
+
+        # 1. Try the OmniRequestOutput.multimodal_output property which
+        #    already checks request_output.outputs[].multimodal_output.
         mm = getattr(res, "multimodal_output", None)
-        if not mm:
-            ro = getattr(res, "request_output", None)
-            mm = getattr(ro, "multimodal_output", None) if ro else None
-        if not mm:
-            return None, None
-        key = "audio" if "audio" in mm else ("model_outputs" if "model_outputs" in mm else None)
-        return mm, key
+        if mm is not None and mm:  # not None AND not empty dict
+            key = _find_key(mm)
+            if key is not None:
+                return mm, key
+
+        # 2. Direct walk: check CompletionOutput.multimodal_output on each
+        #    output inside request_output.outputs[].  This covers cases where
+        #    the property returns {} (default) but audio lives on a specific
+        #    CompletionOutput, or when res is a raw RequestOutput.
+        ro = getattr(res, "request_output", None) or res
+        for output in getattr(ro, "outputs", []):
+            mm = getattr(output, "multimodal_output", None)
+            if mm is not None and mm:
+                key = _find_key(mm)
+                if key is not None:
+                    return mm, key
+
+        return None, None
 
     def _build_tts_params(self, request: OpenAICreateSpeechRequest) -> dict[str, Any]:
         """Build TTS parameters from request.
