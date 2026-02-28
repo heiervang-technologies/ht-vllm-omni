@@ -1,3 +1,20 @@
+<!-- markdownlint-disable MD001 MD041 -->
+<h1 align="center">ht-vllm-omni</h1>
+
+<p align="center">
+    <em>Heiervang Technologies fork of <a href="https://github.com/vllm-project/vllm-omni">vLLM-Omni</a></em>
+</p>
+
+<p align="center">
+    <a href="https://github.com/orgs/heiervang-technologies/discussions">HT Discussions</a> |
+    <a href="https://github.com/orgs/heiervang-technologies/discussions/3">Fork Management Guide</a> |
+    <a href="https://github.com/vllm-project/vllm-omni">Upstream Project</a> |
+    <a href="https://vllm-omni.readthedocs.io/en/latest/"><b>Documentation</b></a> |
+    <a href="https://arxiv.org/abs/2602.02204"><b>Paper</b></a> |
+    <a href="https://discuss.vllm.ai"><b>User Forum</b></a> |
+    <a href="https://slack.vllm.ai"><b>Developer Slack</b></a>
+</p>
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" src="docs/source/logos/ht-vllm-omni-logo.png">
@@ -7,10 +24,6 @@
 <h3 align="center">
 Easy, fast, and cheap omni-modality model serving for everyone
 </h3>
-
-<p align="center">
-| <a href="https://vllm-omni.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href="https://discuss.vllm.ai"><b>User Forum</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a> | <a href="docs/assets/WeChat.jpg"><b>WeChat</b></a> | <a href="https://arxiv.org/abs/2602.02204"><b>Paper</b></a> | <a href="https://docs.google.com/presentation/d/1qv4qMW1rKAqDREMXiUDLIgqqHQe7TDPj/edit?usp=sharing&ouid=110473603432222024453&rtpof=true&sd=true"><b>Slides</b></a> |
-</p>
 
 
 ---
