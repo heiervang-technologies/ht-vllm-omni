@@ -6,14 +6,16 @@ WORKDIR ${APP_DIR}
 
 COPY . .
 
-# Install libsox-fmt-all (base has ffmpeg+sox but not all format plugins)
+# Install system deps (git needed for setuptools-scm, libsox-fmt-all for audio)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libsox-fmt-all && \
+    apt-get install -y --no-install-recommends git libsox-fmt-all && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install vllm-omni
-RUN uv pip install --system --no-cache-dir ".[dev]"
+# Install vllm-omni (SETUPTOOLS_SCM_PRETEND_VERSION avoids git tag lookup)
+ARG SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0
+RUN SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION} \
+    uv pip install --system --no-cache-dir ".[dev]"
 
 RUN ln -sf /usr/bin/python3 /usr/bin/python
 
