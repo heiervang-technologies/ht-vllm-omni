@@ -1,0 +1,27 @@
+name: Fork Rewrite
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_branch:
+        description: 'Upstream branch (e.g. main)'
+        type: string
+        default: 'main'
+      fork_branch:
+        description: 'Branch to rewrite'
+        type: string
+        default: 'ht'
+      dry_run:
+        description: 'Analyze only, do not push'
+        type: boolean
+        default: true
+
+jobs:
+  rewrite:
+    uses: heiervang-technologies/.github/.github/workflows/fork-rewrite-reusable.yml@main
+    with:
+      upstream_branch: ${{ inputs.upstream_branch }}
+      fork_branch: ${{ inputs.fork_branch }}
+      dry_run: ${{ inputs.dry_run }}
+    secrets:
+      gh_pat: ${{ secrets.HAI_GH_PAT }}
