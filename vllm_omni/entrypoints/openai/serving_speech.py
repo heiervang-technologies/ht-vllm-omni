@@ -6,12 +6,14 @@ import json
 import math
 import os
 import socket
+import struct
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import numpy as np
 import soundfile as sf
+import torch
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
@@ -20,6 +22,7 @@ from vllm.utils import random_uuid
 
 from vllm_omni.entrypoints.openai.audio_utils_mixin import AudioMixin
 from vllm_omni.entrypoints.openai.protocol.audio import (
+    AudioResponse,
     CreateAudio,
     OpenAICreateSpeechRequest,
 )
@@ -263,12 +266,33 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             if request.voice is not None and request.voice not in self.supported_speakers:
                 return f"Invalid speaker '{request.voice}'. Supported: {', '.join(sorted(self.supported_speakers))}"
 
+        # Validate speaker_embedding constraints
+        if request.speaker_embedding is not None:
+            if task_type != "Base":
+                return "'speaker_embedding' is only valid for Base task"
+            if request.ref_audio is not None:
+                return "'speaker_embedding' and 'ref_audio' are mutually exclusive"
+            if not request.speaker_embedding:
+                return "'speaker_embedding' must be a non-empty list of floats"
+            emb_len = len(request.speaker_embedding)
+            # ECAPA-TDNN produces 1024-dim (0.6B) or 2048-dim (1.7B)
+            expected_dims = {1024, 2048}
+            if emb_len not in expected_dims:
+                logger.warning(
+                    "speaker_embedding has %d dimensions; expected 1024 "
+                    "(0.6B model) or 2048 (1.7B model). Wrong dimensions "
+                    "will likely result in errors or degraded quality.",
+                    emb_len,
+                )
+
         # Validate Base task requirements
         if task_type == "Base":
-            if request.ref_audio is None:
-                return "Base task requires 'ref_audio' for voice cloning"
+            if request.ref_audio is None and request.speaker_embedding is None:
+                return "Base task requires 'ref_audio' or 'speaker_embedding' for voice cloning"
             # Validate ref_audio format
-            if not (request.ref_audio.startswith(("http://", "https://")) or request.ref_audio.startswith("data:")):
+            if request.ref_audio is not None and not (
+                request.ref_audio.startswith(("http://", "https://")) or request.ref_audio.startswith("data:")
+            ):
                 return "ref_audio must be a URL (http/https) or base64 data URL (data:...)"
             # In-context voice cloning (default) requires non-empty ref_text.
             # x_vector_only_mode skips in-context and only uses speaker embedding.
@@ -289,6 +313,14 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         # Validate VoiceDesign task requirements
         if task_type == "VoiceDesign" and not request.instructions:
             return "VoiceDesign task requires 'instructions' to describe the voice"
+
+        # Validate streaming constraints
+        if request.stream:
+            fmt = (request.response_format or "wav").lower()
+            if fmt not in ("wav", "pcm"):
+                return f"Streaming only supports 'wav' and 'pcm' response formats, got '{fmt}'"
+            if request.speed is not None and request.speed != 1.0:
+                return "Streaming does not support speed adjustment (speed must be 1.0)"
 
         # Validate instructions length (using cached value from initialization)
         if request.instructions and len(request.instructions) > self._max_instructions_length:
@@ -409,17 +441,43 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
     def _extract_audio_output(res) -> tuple[dict | None, str | None]:
         """Return (audio_output dict, audio key) or (None, None).
 
+        Audio data is attached to CompletionOutput.multimodal_output inside
+        request_output.outputs[] by the output processor.  This method checks
+        there first (via the OmniRequestOutput property, then via a direct
+        walk of outputs[]) before falling back to top-level attributes.
+
         Returns the raw dict so callers can apply their own extraction strategy:
         streaming needs per-chunk delta slicing; non-streaming needs full concatenation.
         """
+        _AUDIO_KEYS = ("audio", "model_outputs")
+
+        def _find_key(mm: dict) -> str | None:
+            for k in _AUDIO_KEYS:
+                if k in mm:
+                    return k
+            return None
+
+        # 1. Try the OmniRequestOutput.multimodal_output property which
+        #    already checks request_output.outputs[].multimodal_output.
         mm = getattr(res, "multimodal_output", None)
-        if not mm:
-            ro = getattr(res, "request_output", None)
-            mm = getattr(ro, "multimodal_output", None) if ro else None
-        if not mm:
-            return None, None
-        key = "audio" if "audio" in mm else ("model_outputs" if "model_outputs" in mm else None)
-        return mm, key
+        if mm is not None and mm:  # not None AND not empty dict
+            key = _find_key(mm)
+            if key is not None:
+                return mm, key
+
+        # 2. Direct walk: check CompletionOutput.multimodal_output on each
+        #    output inside request_output.outputs[].  This covers cases where
+        #    the property returns {} (default) but audio lives on a specific
+        #    CompletionOutput, or when res is a raw RequestOutput.
+        ro = getattr(res, "request_output", None) or res
+        for output in getattr(ro, "outputs", []):
+            mm = getattr(output, "multimodal_output", None)
+            if mm is not None and mm:
+                key = _find_key(mm)
+                if key is not None:
+                    return mm, key
+
+        return None, None
 
     def _build_tts_params(self, request: OpenAICreateSpeechRequest) -> dict[str, Any]:
         """Build TTS parameters from request.
@@ -459,7 +517,19 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         # Voice clone: ref_audio resolved in create_speech(), not here.
         if request.ref_text is not None:
             params["ref_text"] = [request.ref_text]
-        if request.x_vector_only_mode is not None:
+        if request.speaker_embedding is not None:
+            # Inject as voice_clone_prompt.ref_spk_embedding — the talker's
+            # _build_prompt_embeds reads the embedding from this dict, not
+            # from a top-level key.
+            spk_tensor = torch.tensor(request.speaker_embedding, dtype=torch.bfloat16)
+            params["voice_clone_prompt"] = [
+                {
+                    "ref_spk_embedding": spk_tensor,
+                }
+            ]
+            # speaker_embedding implies x_vector_only_mode
+            params["x_vector_only_mode"] = [True]
+        elif request.x_vector_only_mode is not None:
             params["x_vector_only_mode"] = [request.x_vector_only_mode]
 
         # Generation parameters
@@ -532,10 +602,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 prompt = {"prompt": request.input}
 
             logger.info(
-                "TTS speech request %s: text=%r, task_type=%s",
+                "TTS speech request %s: text=%r, task_type=%s, stream=%s",
                 request_id,
                 request.input[:50] + "..." if len(request.input) > 50 else request.input,
                 tts_params.get("task_type", ["unknown"])[0],
+                request.stream,
             )
 
             sampling_params_list = self.engine_client.default_sampling_params_list
@@ -572,19 +643,31 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
             # async_chunk mode accumulates chunks as a list; concat first.
             if isinstance(audio_tensor, list):
-                import torch
-
                 audio_tensor = torch.cat(audio_tensor, dim=-1)
             if hasattr(audio_tensor, "float"):
                 audio_tensor = audio_tensor.float().detach().cpu().numpy()
             if audio_tensor.ndim > 1:
                 audio_tensor = audio_tensor.squeeze()
 
+            # Apply speed adjustment if needed
+            speed = request.speed or 1.0
+            if speed != 1.0:
+                audio_obj = CreateAudio(
+                    audio_tensor=audio_tensor,
+                    sample_rate=sample_rate,
+                    response_format=request.response_format or "wav",
+                    speed=speed,
+                    stream_format=request.stream_format,
+                    base64_encode=False,
+                )
+                audio_response: AudioResponse = self.create_audio(audio_obj)
+                return Response(content=audio_response.audio_data, media_type=audio_response.media_type)
+
             audio_obj = CreateAudio(
                 audio_tensor=audio_tensor,
                 sample_rate=sample_rate,
                 response_format=request.response_format or "wav",
-                speed=request.speed or 1.0,
+                speed=1.0,
                 stream_format=request.stream_format,
                 base64_encode=False,
             )
@@ -598,3 +681,107 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         except Exception as e:
             logger.exception("Speech generation failed: %s", e)
             return self.create_error_response(f"Speech generation failed: {e}")
+
+    async def _stream_progressive_audio(
+        self,
+        generator,
+        response_format: str,
+    ):
+        """Stream audio chunks progressively as they arrive from the model.
+
+        The output processor accumulates multimodal tensors, so each yielded
+        output contains ALL audio chunks produced so far (not just the latest
+        one).  We track a cursor to yield only new chunks.
+
+        For WAV format: yields a WAV header with max-size placeholder first,
+        then raw PCM chunks as they become available.
+        For PCM format: yields raw 16-bit signed PCM chunks directly.
+        """
+        header_sent = False
+        sample_rate = 24000  # Default, updated from first chunk
+        chunks_yielded = 0  # Cursor: how many audio chunks we've already sent
+
+        async for output in generator:
+            audio_output, audio_key = self._extract_audio_output(output)
+            if audio_key is None:
+                continue
+
+            sr_raw = audio_output.get("sr", 24000)
+            if isinstance(sr_raw, list) and sr_raw:
+                sr_raw = sr_raw[-1]
+            if hasattr(sr_raw, "item"):
+                sr_raw = sr_raw.item()
+            sample_rate = int(sr_raw)
+
+            # The output processor accumulates audio tensors in a list.
+            # First output: audio_data is a single tensor.
+            # Subsequent outputs: audio_data is [tensor1, tensor2, ...].
+            audio_data = audio_output[audio_key]
+            if isinstance(audio_data, list) and audio_data and hasattr(audio_data[0], "float"):
+                # List of tensors from accumulation - get only new ones
+                new_tensors = audio_data[chunks_yielded:]
+                chunks_yielded = len(audio_data)
+            elif isinstance(audio_data, list) and audio_data and isinstance(audio_data[0], list):
+                # List of lists (deserialized tensors) - get only new ones
+                new_tensors = audio_data[chunks_yielded:]
+                chunks_yielded = len(audio_data)
+            else:
+                # Single tensor — only yield on the first occurrence
+                if chunks_yielded == 0:
+                    new_tensors = [audio_data]
+                    chunks_yielded = 1
+                else:
+                    new_tensors = []
+
+            for audio_tensor in new_tensors:
+                # Convert to numpy - after ZMQ deserialization tensors
+                # may arrive as lists, torch tensors, or numpy arrays.
+                if isinstance(audio_tensor, list):
+                    audio_tensor = np.array(audio_tensor, dtype=np.float32)
+                elif hasattr(audio_tensor, "float"):
+                    audio_tensor = audio_tensor.float().detach().cpu().numpy()
+                if hasattr(audio_tensor, "ndim") and audio_tensor.ndim > 1:
+                    audio_tensor = audio_tensor.squeeze()
+
+                if len(audio_tensor) == 0:
+                    continue
+
+                # Convert float audio to int16 PCM
+                audio_float = audio_tensor.astype(np.float32)
+                audio_float = np.clip(audio_float, -1.0, 1.0)
+                pcm_chunk = (audio_float * 32767).astype(np.int16).tobytes()
+
+                if response_format == "wav" and not header_sent:
+                    yield _make_wav_header(sample_rate, 0x7FFFFFFF)
+                    header_sent = True
+
+                yield pcm_chunk
+
+
+_STREAM_MEDIA_TYPES = {
+    "wav": "audio/wav",
+    "pcm": "audio/pcm",
+}
+
+
+def _make_wav_header(sample_rate: int, data_size: int, num_channels: int = 1, bits_per_sample: int = 16) -> bytes:
+    """Build a standard WAV (RIFF) header for PCM data."""
+    byte_rate = sample_rate * num_channels * bits_per_sample // 8
+    block_align = num_channels * bits_per_sample // 8
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,  # file size - 8
+        b"WAVE",
+        b"fmt ",
+        16,  # fmt chunk size
+        1,  # PCM format
+        num_channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data",
+        data_size,
+    )
+    return header
