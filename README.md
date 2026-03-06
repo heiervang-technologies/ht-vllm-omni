@@ -36,13 +36,21 @@ This is the [Heiervang Technologies](https://github.com/heiervang-technologies) 
 - HTTP-level streaming for TTS speech API (`/v1/audio/speech`)
 - `tts-stream` bash tool for low-latency streaming playback
 - Python streaming client with latency benchmarks
+- E2E tests for streaming (PCM output, silence check, chunked transfer, validation)
+
+### Speaker Embedding
+- `speaker_embedding` API parameter for direct voice cloning (bypasses ref_audio)
+- Fix: speaker embedding survives EngineCore IPC serialization ([#22](https://github.com/heiervang-technologies/ht-vllm-omni/issues/22))
+- Speaker embedding extraction and SLERP interpolation example
+- E2E tests for 0.6B-Base, 0.6B-CustomVoice, and 1.7B-Base models
 
 ### Qwen3 TTS Performance
 - ~~CUDA graph support for speech tokenizer decoder~~ *(now in upstream — [#1617](https://github.com/vllm-project/vllm-omni/pull/1617))*
 
-### Speaker Embedding
-- `speaker_embedding` API parameter for direct voice cloning (bypasses ref_audio)
-- Speaker embedding extraction and SLERP interpolation example
+### CI/Infrastructure
+- GHCR Docker build workflow (`Dockerfile.slim`)
+- Fork sync automation
+- Pre-commit on PRs targeting `ht` branch
 
 ---
 
