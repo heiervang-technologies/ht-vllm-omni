@@ -478,8 +478,9 @@ class TestTTSMethods:
         assert "voice_clone_prompt" in params
         vcp = params["voice_clone_prompt"][0]
         assert "ref_spk_embedding" in vcp
-        assert vcp["ref_spk_embedding"].shape == (1024,)
-        assert vcp["ref_spk_embedding"].dtype == torch.bfloat16
+        # Stored as plain list (not tensor) so it survives msgspec IPC serialization
+        assert isinstance(vcp["ref_spk_embedding"], list)
+        assert len(vcp["ref_spk_embedding"]) == 1024
         assert params["x_vector_only_mode"] == [True]
 
     def test_build_tts_params_without_speaker_embedding(self, speech_server):

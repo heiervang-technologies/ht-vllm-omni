@@ -518,13 +518,12 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if request.ref_text is not None:
             params["ref_text"] = [request.ref_text]
         if request.speaker_embedding is not None:
-            # Inject as voice_clone_prompt.ref_spk_embedding — the talker's
-            # _build_prompt_embeds reads the embedding from this dict, not
-            # from a top-level key.
-            spk_tensor = torch.tensor(request.speaker_embedding, dtype=torch.bfloat16)
+            # Store as plain float list (not tensor) so it survives msgspec
+            # serialization through the EngineCore IPC boundary.  The talker's
+            # _build_prompt_embeds converts it back to a tensor on the GPU.
             params["voice_clone_prompt"] = [
                 {
-                    "ref_spk_embedding": spk_tensor,
+                    "ref_spk_embedding": list(request.speaker_embedding),
                 }
             ]
             # speaker_embedding implies x_vector_only_mode
