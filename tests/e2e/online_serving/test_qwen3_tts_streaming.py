@@ -138,7 +138,7 @@ class TestStreamingCustomVoice:
     @pytest.mark.omni
     @hardware_test(res={"cuda": "L4"}, num_cards=1)
     def test_streaming_wav_rejected(self, streaming_server) -> None:
-        """stream=True with response_format=wav returns 422 (protocol validation)."""
+        """stream=True with response_format=wav is rejected (pydantic validation → 400)."""
         url = f"http://{streaming_server.host}:{streaming_server.port}/v1/audio/speech"
         payload = {
             "model": MODEL,
@@ -150,15 +150,16 @@ class TestStreamingCustomVoice:
         with httpx.Client(timeout=30.0) as client:
             response = client.post(url, json=payload)
 
-        assert response.status_code == 422, (
-            f"Expected 422 for stream+wav, got {response.status_code}: {response.text}"
+        assert response.status_code == 400, (
+            f"Expected 400 for stream+wav, got {response.status_code}: {response.text}"
         )
+        assert "response_format='pcm'" in response.text
 
     @pytest.mark.core_model
     @pytest.mark.omni
     @hardware_test(res={"cuda": "L4"}, num_cards=1)
     def test_streaming_with_speed_rejected(self, streaming_server) -> None:
-        """stream=True with speed!=1.0 returns 422."""
+        """stream=True with speed!=1.0 returns 400."""
         url = f"http://{streaming_server.host}:{streaming_server.port}/v1/audio/speech"
         payload = {
             "model": MODEL,
@@ -171,9 +172,10 @@ class TestStreamingCustomVoice:
         with httpx.Client(timeout=30.0) as client:
             response = client.post(url, json=payload)
 
-        assert response.status_code == 422, (
-            f"Expected 422 for stream+speed, got {response.status_code}: {response.text}"
+        assert response.status_code == 400, (
+            f"Expected 400 for stream+speed, got {response.status_code}: {response.text}"
         )
+        assert "Speed adjustment" in response.text
 
     @pytest.mark.core_model
     @pytest.mark.omni
