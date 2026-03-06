@@ -2,9 +2,9 @@ name: pre-commit
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, ht]
   push:
-    branches: [main]
+    branches: [main, ht]
   workflow_dispatch: # for manual trigger
 
 concurrency:
