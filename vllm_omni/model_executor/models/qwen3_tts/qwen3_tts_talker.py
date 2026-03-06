@@ -1119,6 +1119,17 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         else:
             tok.device = dev
         self._speech_tokenizer = tok
+
+        # Enable CUDA graph for speech tokenizer decoder if on CUDA
+        try:
+            if tok.model is not None and hasattr(tok.model, "decoder"):
+                decoder = tok.model.decoder
+                if dev.type == "cuda" and hasattr(decoder, "enable_cudagraph"):
+                    decoder.enable_cudagraph(capture_sizes=[25, 50, 100, 150, 200, 250, 300])
+                    logger.info("CUDA Graph enabled for talker speech tokenizer decoder")
+        except Exception as e:
+            logger.warning(f"Failed to enable CUDA Graph for talker decoder: {e}")
+
         return tok
 
     def _encode_ref_audio_to_code(self, wav: np.ndarray, sr: int) -> torch.Tensor:
@@ -1345,11 +1356,17 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                 ref_code_prompt = ref_code_t
 
             # Speaker embedding: use prompt embed if provided; otherwise extract from audio.
+            # NOTE: Do NOT use _as_singleton here — the embedding may be a plain
+            # float list (from API via msgspec IPC) that _as_singleton would
+            # destructively unwrap to a single scalar.
             spk = None
             if voice_clone_prompt is not None:
-                spk = _as_singleton(voice_clone_prompt.get("ref_spk_embedding"))
+                spk = voice_clone_prompt.get("ref_spk_embedding")
             if isinstance(spk, torch.Tensor):
                 speaker_embed = spk.to(device=input_ids.device, dtype=torch.bfloat16).view(1, 1, -1)
+            elif isinstance(spk, (list, np.ndarray)):
+                # Plain list/array from API (survived msgspec IPC serialization).
+                speaker_embed = torch.tensor(spk, dtype=torch.bfloat16, device=input_ids.device).view(1, 1, -1)
             else:
                 ref_audio_list = info_dict.get("ref_audio")
                 if not isinstance(ref_audio_list, list) or not ref_audio_list:

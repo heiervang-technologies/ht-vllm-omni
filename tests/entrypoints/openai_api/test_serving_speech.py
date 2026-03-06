@@ -1,6 +1,7 @@
 # tests/entrypoints/openai/test_serving_speech.py
 import logging
 import os
+import struct
 from inspect import Signature, signature
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -18,6 +19,7 @@ from vllm_omni.entrypoints.openai.audio_utils_mixin import AudioMixin
 from vllm_omni.entrypoints.openai.protocol.audio import CreateAudio, OpenAICreateSpeechRequest
 from vllm_omni.entrypoints.openai.serving_speech import (
     OmniOpenAIServingSpeech,
+    _make_wav_header,
 )
 from vllm_omni.outputs import OmniRequestOutput
 
@@ -594,6 +596,86 @@ class TestTTSMethods:
         result = speech_server._validate_tts_request(req)
         assert "does not support CustomVoice" in result
 
+    # ── speaker_embedding validation ──
+
+    def test_speaker_embedding_valid_base_task(self, speech_server):
+        """speaker_embedding with Base task, x_vector_only_mode, and no ref_audio is accepted."""
+        emb = [0.1] * 1024
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb, x_vector_only_mode=True)
+        assert speech_server._validate_tts_request(req) is None
+
+    def test_speaker_embedding_requires_x_vector_only_mode(self, speech_server):
+        """speaker_embedding without x_vector_only_mode fails ref_text validation."""
+        emb = [0.1] * 1024
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb)
+        result = speech_server._validate_tts_request(req)
+        assert "x_vector_only_mode" in result
+
+    def test_speaker_embedding_wrong_task_type(self, speech_server):
+        """speaker_embedding is only valid for Base task."""
+        emb = [0.1] * 1024
+        req = OpenAICreateSpeechRequest(
+            input="Hello", task_type="VoiceDesign", speaker_embedding=emb, instructions="warm"
+        )
+        result = speech_server._validate_tts_request(req)
+        assert "only valid for Base task" in result
+
+    def test_speaker_embedding_mutually_exclusive_with_ref_audio(self, speech_server):
+        """speaker_embedding and ref_audio cannot both be provided."""
+        emb = [0.1] * 1024
+        req = OpenAICreateSpeechRequest(
+            input="Hello", task_type="Base", speaker_embedding=emb, ref_audio="data:audio/wav;base64,abc"
+        )
+        result = speech_server._validate_tts_request(req)
+        assert "mutually exclusive" in result
+
+    def test_speaker_embedding_empty_list_rejected(self, speech_server):
+        """Empty speaker_embedding list is rejected."""
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=[])
+        result = speech_server._validate_tts_request(req)
+        assert "non-empty" in result
+
+    def test_speaker_embedding_wrong_dims_accepted(self, speech_server):
+        """Non-standard dimensions pass validation (warning only, not an error)."""
+        emb = [0.1] * 512  # not 1024 or 2048
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb, x_vector_only_mode=True)
+        result = speech_server._validate_tts_request(req)
+        assert result is None
+
+    def test_speaker_embedding_2048_dims_accepted(self, speech_server):
+        """2048-dim embedding (1.7B model) is accepted without warning."""
+        emb = [0.1] * 2048
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb, x_vector_only_mode=True)
+        assert speech_server._validate_tts_request(req) is None
+
+    def test_base_task_requires_ref_audio_or_speaker_embedding(self, speech_server):
+        """Base task without ref_audio or speaker_embedding is rejected."""
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base")
+        result = speech_server._validate_tts_request(req)
+        assert "ref_audio" in result and "speaker_embedding" in result
+
+    # ── speaker_embedding in _build_tts_params ──
+
+    def test_build_tts_params_with_speaker_embedding(self, speech_server):
+        """speaker_embedding produces voice_clone_prompt and x_vector_only_mode."""
+        emb = [0.1] * 1024
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb)
+        params = speech_server._build_tts_params(req)
+
+        assert "voice_clone_prompt" in params
+        vcp = params["voice_clone_prompt"][0]
+        assert "ref_spk_embedding" in vcp
+        # Stored as plain list (not tensor) so it survives msgspec IPC serialization
+        assert isinstance(vcp["ref_spk_embedding"], list)
+        assert len(vcp["ref_spk_embedding"]) == 1024
+        assert params["x_vector_only_mode"] == [True]
+
+    def test_build_tts_params_without_speaker_embedding(self, speech_server):
+        """Without speaker_embedding, voice_clone_prompt is not set."""
+        req = OpenAICreateSpeechRequest(input="Hello", voice="Ryan", language="English")
+        params = speech_server._build_tts_params(req)
+        assert "voice_clone_prompt" not in params
+
     def test_build_tts_params(self, speech_server):
         """Test TTS parameter building."""
         req = OpenAICreateSpeechRequest(input="Hello", voice="Ryan", language="English")
@@ -1017,3 +1099,200 @@ class TestStreamingResponse:
         response = client.post("/v1/audio/speech", json={"input": "Hello", "response_format": "wav"})
         assert response.status_code == 200
         assert "audio/wav" in response.headers["content-type"]
+
+    def test_streaming_yields_multiple_chunks(self, streaming_app):
+        """Streaming PCM body must contain data from both engine chunks."""
+        client = TestClient(streaming_app)
+        response = client.post("/v1/audio/speech", json={"input": "Hello", "stream": True, "response_format": "pcm"})
+        assert response.status_code == 200
+        # The mock yields two 24000-sample chunks (each ~48000 bytes as int16).
+        # The response should contain substantially more than a single chunk.
+        assert len(response.content) > 48000, (
+            f"Expected data from multiple chunks, got only {len(response.content)} bytes"
+        )
+
+
+class TestStreamingCumulativeMode:
+    """Test _generate_pcm_chunks with cumulative (list) audio output."""
+
+    @pytest.fixture
+    def cumulative_streaming_app(self, mocker: MockerFixture):
+        """Engine yields cumulative list of audio tensors (grows each step)."""
+        mock_engine_client = mocker.MagicMock()
+        mock_engine_client.errored = False
+
+        chunk_a = torch.sin(torch.linspace(0, 440 * 2 * torch.pi, 4800))
+        chunk_b = torch.sin(torch.linspace(0, 880 * 2 * torch.pi, 4800))
+
+        def _make_output(chunks: list, finished: bool) -> OmniRequestOutput:
+            class MockCompletionOutput:
+                def __init__(self):
+                    self.index = 0
+                    self.text = ""
+                    self.token_ids = []
+                    self.finish_reason = "stop"
+                    self.stop_reason = None
+                    self.logprobs = None
+
+            class MockRequestOutput:
+                def __init__(self, audio_list, fin):
+                    self.request_id = "stream-cumul-test"
+                    self.outputs = [MockCompletionOutput()]
+                    self.multimodal_output = {"audio": audio_list}
+                    self.finished = fin
+                    self.prompt_token_ids = None
+                    self.encoder_prompt_token_ids = None
+                    self.num_cached_tokens = None
+                    self.prompt_logprobs = None
+                    self.kv_transfer_params = None
+
+            return OmniRequestOutput(
+                stage_id=0,
+                final_output_type="audio",
+                request_output=MockRequestOutput(chunks, finished),
+                finished=finished,
+            )
+
+        async def mock_generate(*args, **kwargs):
+            # Step 1: list with one tensor
+            yield _make_output([chunk_a], finished=False)
+            # Step 2: list grows to two tensors (cumulative)
+            yield _make_output([chunk_a, chunk_b], finished=True)
+
+        mock_engine_client.generate = mocker.MagicMock(side_effect=mock_generate)
+        mock_engine_client.default_sampling_params_list = [{}]
+        mock_models = mocker.MagicMock()
+        mock_models.is_base_model.return_value = True
+
+        speech_server = OmniOpenAIServingSpeech(
+            engine_client=mock_engine_client,
+            models=mock_models,
+            request_logger=mocker.MagicMock(),
+        )
+
+        original = speech_server.create_speech
+        sig = signature(original)
+        new_params = [p for name, p in sig.parameters.items() if name != "raw_request"]
+        new_sig = Signature(parameters=new_params, return_annotation=sig.return_annotation)
+
+        async def patched(*args, **kwargs):
+            return await original(*args, **kwargs)
+
+        patched.__signature__ = new_sig
+        speech_server.create_speech = patched
+
+        app = FastAPI()
+        app.add_api_route("/v1/audio/speech", speech_server.create_speech, methods=["POST"], response_model=None)
+        return app
+
+    def test_cumulative_list_deduplication(self, cumulative_streaming_app):
+        """Cumulative mode must emit each chunk exactly once (not re-emit old ones)."""
+        client = TestClient(cumulative_streaming_app)
+        response = client.post("/v1/audio/speech", json={"input": "Hi", "stream": True, "response_format": "pcm"})
+        assert response.status_code == 200
+        # Two 4800-sample chunks → 2 * 4800 * 2 = 19200 bytes of int16 PCM.
+        expected_bytes = 2 * 4800 * 2
+        assert len(response.content) == expected_bytes, (
+            f"Expected {expected_bytes} bytes (no duplication), got {len(response.content)}"
+        )
+
+
+class TestMakeWavHeader:
+    """Tests for the _make_wav_header helper."""
+
+    def test_wav_header_structure(self):
+        """Header must be valid 44-byte RIFF/WAVE with correct fields."""
+        header = _make_wav_header(sample_rate=24000, data_size=48000)
+        assert len(header) == 44
+        assert header[:4] == b"RIFF"
+        assert header[8:12] == b"WAVE"
+        assert header[12:16] == b"fmt "
+        assert header[36:40] == b"data"
+
+        # Parse fields
+        file_size = struct.unpack_from("<I", header, 4)[0]
+        assert file_size == 36 + 48000
+
+        fmt_size = struct.unpack_from("<I", header, 16)[0]
+        assert fmt_size == 16
+
+        audio_format = struct.unpack_from("<H", header, 20)[0]
+        assert audio_format == 1  # PCM
+
+        num_channels = struct.unpack_from("<H", header, 22)[0]
+        assert num_channels == 1
+
+        sr = struct.unpack_from("<I", header, 24)[0]
+        assert sr == 24000
+
+        bits_per_sample = struct.unpack_from("<H", header, 34)[0]
+        assert bits_per_sample == 16
+
+        data_size = struct.unpack_from("<I", header, 40)[0]
+        assert data_size == 48000
+
+    def test_wav_header_stereo(self):
+        """Stereo header must set num_channels=2 and adjust byte_rate/block_align."""
+        header = _make_wav_header(sample_rate=44100, data_size=1000, num_channels=2, bits_per_sample=16)
+        num_channels = struct.unpack_from("<H", header, 22)[0]
+        assert num_channels == 2
+        byte_rate = struct.unpack_from("<I", header, 28)[0]
+        assert byte_rate == 44100 * 2 * 2  # sr * channels * bytes_per_sample
+        block_align = struct.unpack_from("<H", header, 32)[0]
+        assert block_align == 4  # 2 channels * 2 bytes
+
+    def test_wav_header_max_size_placeholder(self):
+        """Streaming uses 0x7FFFFFFF placeholder — header must encode it."""
+        header = _make_wav_header(sample_rate=24000, data_size=0x7FFFFFFF)
+        data_size = struct.unpack_from("<I", header, 40)[0]
+        assert data_size == 0x7FFFFFFF
+
+
+class TestExtractAudioOutput:
+    """Tests for OmniOpenAIServingSpeech._extract_audio_output."""
+
+    def test_extracts_from_multimodal_output_property(self):
+        """Extracts audio from res.multimodal_output dict."""
+
+        class FakeRes:
+            multimodal_output = {"audio": torch.zeros(100)}
+
+        mm, key = OmniOpenAIServingSpeech._extract_audio_output(FakeRes())
+        assert key == "audio"
+        assert mm is FakeRes.multimodal_output
+
+    def test_extracts_model_outputs_key(self):
+        """Falls back to 'model_outputs' key."""
+
+        class FakeRes:
+            multimodal_output = {"model_outputs": [torch.zeros(100)]}
+
+        mm, key = OmniOpenAIServingSpeech._extract_audio_output(FakeRes())
+        assert key == "model_outputs"
+
+    def test_returns_none_for_empty(self):
+        """Returns (None, None) when no audio present."""
+
+        class FakeRes:
+            multimodal_output = {}
+            request_output = None
+
+        mm, key = OmniOpenAIServingSpeech._extract_audio_output(FakeRes())
+        assert mm is None
+        assert key is None
+
+    def test_extracts_from_completion_output(self):
+        """Falls back to walking request_output.outputs[]."""
+
+        class FakeOutput:
+            multimodal_output = {"audio": torch.ones(50)}
+
+        class FakeRequestOutput:
+            outputs = [FakeOutput()]
+
+        class FakeRes:
+            multimodal_output = {}
+            request_output = FakeRequestOutput()
+
+        mm, key = OmniOpenAIServingSpeech._extract_audio_output(FakeRes())
+        assert key == "audio"
