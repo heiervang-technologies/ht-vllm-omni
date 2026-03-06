@@ -412,9 +412,7 @@ class TestTTSMethods:
     def test_speaker_embedding_valid_base_task(self, speech_server):
         """speaker_embedding with Base task, x_vector_only_mode, and no ref_audio is accepted."""
         emb = [0.1] * 1024
-        req = OpenAICreateSpeechRequest(
-            input="Hello", task_type="Base", speaker_embedding=emb, x_vector_only_mode=True
-        )
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb, x_vector_only_mode=True)
         assert speech_server._validate_tts_request(req) is None
 
     def test_speaker_embedding_requires_x_vector_only_mode(self, speech_server):
@@ -427,7 +425,9 @@ class TestTTSMethods:
     def test_speaker_embedding_wrong_task_type(self, speech_server):
         """speaker_embedding is only valid for Base task."""
         emb = [0.1] * 1024
-        req = OpenAICreateSpeechRequest(input="Hello", task_type="VoiceDesign", speaker_embedding=emb, instructions="warm")
+        req = OpenAICreateSpeechRequest(
+            input="Hello", task_type="VoiceDesign", speaker_embedding=emb, instructions="warm"
+        )
         result = speech_server._validate_tts_request(req)
         assert "only valid for Base task" in result
 
@@ -449,18 +449,14 @@ class TestTTSMethods:
     def test_speaker_embedding_wrong_dims_accepted(self, speech_server):
         """Non-standard dimensions pass validation (warning only, not an error)."""
         emb = [0.1] * 512  # not 1024 or 2048
-        req = OpenAICreateSpeechRequest(
-            input="Hello", task_type="Base", speaker_embedding=emb, x_vector_only_mode=True
-        )
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb, x_vector_only_mode=True)
         result = speech_server._validate_tts_request(req)
         assert result is None
 
     def test_speaker_embedding_2048_dims_accepted(self, speech_server):
         """2048-dim embedding (1.7B model) is accepted without warning."""
         emb = [0.1] * 2048
-        req = OpenAICreateSpeechRequest(
-            input="Hello", task_type="Base", speaker_embedding=emb, x_vector_only_mode=True
-        )
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb, x_vector_only_mode=True)
         assert speech_server._validate_tts_request(req) is None
 
     def test_base_task_requires_ref_audio_or_speaker_embedding(self, speech_server):
@@ -889,36 +885,46 @@ class TestExtractAudioOutput:
 
     def test_extracts_from_multimodal_output_property(self):
         """Extracts audio from res.multimodal_output dict."""
+
         class FakeRes:
             multimodal_output = {"audio": torch.zeros(100)}
+
         mm, key = OmniOpenAIServingSpeech._extract_audio_output(FakeRes())
         assert key == "audio"
         assert mm is FakeRes.multimodal_output
 
     def test_extracts_model_outputs_key(self):
         """Falls back to 'model_outputs' key."""
+
         class FakeRes:
             multimodal_output = {"model_outputs": [torch.zeros(100)]}
+
         mm, key = OmniOpenAIServingSpeech._extract_audio_output(FakeRes())
         assert key == "model_outputs"
 
     def test_returns_none_for_empty(self):
         """Returns (None, None) when no audio present."""
+
         class FakeRes:
             multimodal_output = {}
             request_output = None
+
         mm, key = OmniOpenAIServingSpeech._extract_audio_output(FakeRes())
         assert mm is None
         assert key is None
 
     def test_extracts_from_completion_output(self):
         """Falls back to walking request_output.outputs[]."""
+
         class FakeOutput:
             multimodal_output = {"audio": torch.ones(50)}
+
         class FakeRequestOutput:
             outputs = [FakeOutput()]
+
         class FakeRes:
             multimodal_output = {}
             request_output = FakeRequestOutput()
+
         mm, key = OmniOpenAIServingSpeech._extract_audio_output(FakeRes())
         assert key == "audio"

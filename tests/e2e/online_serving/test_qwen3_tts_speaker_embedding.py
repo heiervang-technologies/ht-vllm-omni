@@ -43,11 +43,7 @@ MAX_NEW_TOKENS = 256
 
 def get_stage_config():
     return str(
-        Path(__file__).parent.parent.parent.parent
-        / "vllm_omni"
-        / "model_executor"
-        / "stage_configs"
-        / "qwen3_tts.yaml"
+        Path(__file__).parent.parent.parent.parent / "vllm_omni" / "model_executor" / "stage_configs" / "qwen3_tts.yaml"
     )
 
 
@@ -110,9 +106,7 @@ class TestSpeakerEmbeddingBase:
         assert response.status_code == 200, f"Request failed: {response.text}"
         assert response.headers.get("content-type") == "audio/wav"
         assert verify_wav_audio(response.content), "Response is not valid WAV"
-        assert len(response.content) > MIN_AUDIO_BYTES, (
-            f"Audio too small: {len(response.content)} bytes"
-        )
+        assert len(response.content) > MIN_AUDIO_BYTES, f"Audio too small: {len(response.content)} bytes"
 
     @pytest.mark.core_model
     @pytest.mark.omni
@@ -295,9 +289,7 @@ class TestSpeakerEmbedding1_7B:
         assert response.status_code == 200, f"Request failed: {response.text}"
         assert response.headers.get("content-type") == "audio/wav"
         assert verify_wav_audio(response.content), "Response is not valid WAV"
-        assert len(response.content) > MIN_AUDIO_BYTES, (
-            f"Audio too small: {len(response.content)} bytes"
-        )
+        assert len(response.content) > MIN_AUDIO_BYTES, f"Audio too small: {len(response.content)} bytes"
 
     @pytest.mark.core_model
     @pytest.mark.omni

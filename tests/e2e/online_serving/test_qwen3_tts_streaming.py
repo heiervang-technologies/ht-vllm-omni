@@ -30,11 +30,7 @@ MIN_AUDIO_BYTES = 2000
 
 def get_stage_config():
     return str(
-        Path(__file__).parent.parent.parent.parent
-        / "vllm_omni"
-        / "model_executor"
-        / "stage_configs"
-        / "qwen3_tts.yaml"
+        Path(__file__).parent.parent.parent.parent / "vllm_omni" / "model_executor" / "stage_configs" / "qwen3_tts.yaml"
     )
 
 
@@ -86,9 +82,7 @@ class TestStreamingCustomVoice:
 
         assert response.status_code == 200, f"Request failed: {response.text}"
         assert "audio/pcm" in response.headers.get("content-type", "")
-        assert len(response.content) > MIN_AUDIO_BYTES, (
-            f"Audio too small: {len(response.content)} bytes"
-        )
+        assert len(response.content) > MIN_AUDIO_BYTES, f"Audio too small: {len(response.content)} bytes"
 
     @pytest.mark.core_model
     @pytest.mark.omni
@@ -150,9 +144,7 @@ class TestStreamingCustomVoice:
         with httpx.Client(timeout=30.0) as client:
             response = client.post(url, json=payload)
 
-        assert response.status_code == 400, (
-            f"Expected 400 for stream+wav, got {response.status_code}: {response.text}"
-        )
+        assert response.status_code == 400, f"Expected 400 for stream+wav, got {response.status_code}: {response.text}"
         assert "response_format='pcm'" in response.text
 
     @pytest.mark.core_model
