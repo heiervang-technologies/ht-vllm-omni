@@ -27,10 +27,12 @@ from tests.utils import hardware_test
 
 MODEL_BASE = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 MODEL_CUSTOMVOICE = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+MODEL_BASE_1_7B = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 
 # A synthetic 1024-dim speaker embedding (all 0.1 — not a real voice, but
 # exercises the full code path through the talker's _build_prompt_embeds).
 DUMMY_EMBEDDING_1024 = [0.1] * 1024
+DUMMY_EMBEDDING_2048 = [0.1] * 2048
 
 SYN_TEXT = "Hello."
 MIN_AUDIO_BYTES = 2000
@@ -41,11 +43,7 @@ MAX_NEW_TOKENS = 256
 
 def get_stage_config():
     return str(
-        Path(__file__).parent.parent.parent.parent
-        / "vllm_omni"
-        / "model_executor"
-        / "stage_configs"
-        / "qwen3_tts.yaml"
+        Path(__file__).parent.parent.parent.parent / "vllm_omni" / "model_executor" / "stage_configs" / "qwen3_tts.yaml"
     )
 
 
@@ -108,9 +106,7 @@ class TestSpeakerEmbeddingBase:
         assert response.status_code == 200, f"Request failed: {response.text}"
         assert response.headers.get("content-type") == "audio/wav"
         assert verify_wav_audio(response.content), "Response is not valid WAV"
-        assert len(response.content) > MIN_AUDIO_BYTES, (
-            f"Audio too small: {len(response.content)} bytes"
-        )
+        assert len(response.content) > MIN_AUDIO_BYTES, f"Audio too small: {len(response.content)} bytes"
 
     @pytest.mark.core_model
     @pytest.mark.omni
@@ -257,3 +253,63 @@ class TestSpeakerEmbeddingCustomVoice:
         assert response.status_code == 200, f"Request failed: {response.text}"
         assert verify_wav_audio(response.content), "Response is not valid WAV"
         assert len(response.content) > MIN_AUDIO_BYTES
+
+
+# ── 1.7B-Base model tests (2048-dim embeddings) ──
+
+
+@pytest.fixture(scope="module")
+def base_1_7b_server():
+    """Start vLLM-Omni server with 1.7B-Base model."""
+    with OmniServer(MODEL_BASE_1_7B, _server_args()) as server:
+        yield server
+
+
+class TestSpeakerEmbedding1_7B:
+    """Speaker embedding tests against the 1.7B-Base model (2048-dim embeddings)."""
+
+    @pytest.mark.core_model
+    @pytest.mark.omni
+    @hardware_test(res={"cuda": "L4"}, num_cards=1)
+    def test_2048_dim_embedding_produces_audio(self, base_1_7b_server) -> None:
+        """2048-dim speaker_embedding with 1.7B-Base model produces valid WAV audio."""
+        url = f"http://{base_1_7b_server.host}:{base_1_7b_server.port}/v1/audio/speech"
+        payload = {
+            "model": MODEL_BASE_1_7B,
+            "input": SYN_TEXT,
+            "task_type": "Base",
+            "speaker_embedding": DUMMY_EMBEDDING_2048,
+            "x_vector_only_mode": True,
+            "response_format": "wav",
+            "max_new_tokens": MAX_NEW_TOKENS,
+        }
+        with httpx.Client(timeout=120.0) as client:
+            response = client.post(url, json=payload)
+
+        assert response.status_code == 200, f"Request failed: {response.text}"
+        assert response.headers.get("content-type") == "audio/wav"
+        assert verify_wav_audio(response.content), "Response is not valid WAV"
+        assert len(response.content) > MIN_AUDIO_BYTES, f"Audio too small: {len(response.content)} bytes"
+
+    @pytest.mark.core_model
+    @pytest.mark.omni
+    @hardware_test(res={"cuda": "L4"}, num_cards=1)
+    def test_1024_dim_on_1_7b_model_rejected_or_errors(self, base_1_7b_server) -> None:
+        """1024-dim embedding on a 1.7B model (expects 2048) should fail gracefully."""
+        url = f"http://{base_1_7b_server.host}:{base_1_7b_server.port}/v1/audio/speech"
+        payload = {
+            "model": MODEL_BASE_1_7B,
+            "input": SYN_TEXT,
+            "task_type": "Base",
+            "speaker_embedding": DUMMY_EMBEDDING_1024,
+            "x_vector_only_mode": True,
+            "response_format": "wav",
+            "max_new_tokens": MAX_NEW_TOKENS,
+        }
+        with httpx.Client(timeout=120.0) as client:
+            response = client.post(url, json=payload)
+
+        # Wrong dimensions should produce an error, not silent garbage.
+        assert response.status_code != 200 or len(response.content) < MIN_AUDIO_BYTES, (
+            "Expected failure or degenerate output with wrong embedding dimensions"
+        )
