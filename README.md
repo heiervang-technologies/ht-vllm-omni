@@ -38,7 +38,7 @@ This is the [Heiervang Technologies](https://github.com/heiervang-technologies) 
 - Python streaming client with latency benchmarks
 
 ### Qwen3 TTS Performance
-- CUDA graph support for speech tokenizer decoder *(cherry-picked from unmerged upstream PR [#1205](https://github.com/vllm-project/vllm-omni/pull/1205))*
+- ~~CUDA graph support for speech tokenizer decoder~~ *(now in upstream — [#1617](https://github.com/vllm-project/vllm-omni/pull/1617))*
 
 ### Speaker Embedding
 - `speaker_embedding` API parameter for direct voice cloning (bypasses ref_audio)
