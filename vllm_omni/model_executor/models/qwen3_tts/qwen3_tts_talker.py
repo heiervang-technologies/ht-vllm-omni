@@ -330,15 +330,18 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         self._eos_logit_bias: float = 0.0
 
         # Entropy guardrail: per-request state keyed by id(output_token_ids list).
-        # Each entry: {"consecutive_oob": int, "config": dict}
+        # Each entry: {"consecutive_oob": int, "cfg": dict}
         self._entropy_state: dict[int, dict[str, Any]] = {}
-        # Default guardrail config (can be overridden per-request via additional_information).
+        # Default guardrail config (used when no per-request override is provided).
         self._entropy_defaults: dict[str, Any] = {
             "enabled": False,
             "threshold_high": 4.5,
             "threshold_low": 0.5,
             "window": 5,
         }
+        # Staging queue: preprocess appends per-request entropy configs in batch
+        # order; _apply_entropy_guardrail consumes them to initialize new entries.
+        self._entropy_config_staging: list[dict[str, Any]] = []
 
         self.have_multimodal_outputs = True
         self.has_preprocess = True
@@ -466,11 +469,10 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         When consecutive out-of-range steps exceed the window size, the EOS token
         logit is set very high and all others suppressed, forcing the sampler to
         pick EOS and terminate generation cleanly.
-        """
-        cfg = self._entropy_defaults
-        if not cfg["enabled"]:
-            return logits
 
+        Per-request config is stored in ``_entropy_state[key]["cfg"]`` and
+        initialized from ``_entropy_config_staging`` (populated by preprocess).
+        """
         output_token_ids = getattr(sampling_metadata, "output_token_ids", None)
         if not output_token_ids:
             return logits
@@ -479,58 +481,97 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         if eos_id < 0 or eos_id >= logits.shape[-1]:
             return logits
 
-        threshold_high = cfg["threshold_high"]
-        threshold_low = cfg["threshold_low"]
-        window = cfg["window"]
+        batch_size = min(logits.shape[0], len(output_token_ids))
+
+        # Consume staged configs (from preprocess) for new requests.
+        staged = self._entropy_config_staging
+        self._entropy_config_staging = []
+
+        # Check if any request in the batch has the guardrail enabled.
+        any_enabled = False
+        for i in range(batch_size):
+            key = id(output_token_ids[i])
+            state = self._entropy_state.get(key)
+            if state is not None:
+                if state["cfg"]["enabled"]:
+                    any_enabled = True
+            elif staged:
+                # New request: pop first staged config.
+                cfg = staged.pop(0)
+                if cfg["enabled"]:
+                    any_enabled = True
+                self._entropy_state[key] = {
+                    "consecutive_oob": 0,
+                    "last_step": 0,
+                    "cfg": cfg,
+                }
+            else:
+                # No staged config available; use defaults.
+                if self._entropy_defaults["enabled"]:
+                    any_enabled = True
+                self._entropy_state[key] = {
+                    "consecutive_oob": 0,
+                    "last_step": 0,
+                    "cfg": dict(self._entropy_defaults),
+                }
+
+        if not any_enabled:
+            return logits
 
         # Compute entropy for each batch element.
-        # Use only the valid (non -inf) logits for stable softmax.
         with torch.no_grad():
             probs = F.softmax(logits, dim=-1)
-            # Shannon entropy in nats: H = -sum(p * ln(p))
             log_probs = torch.log(probs + 1e-10)
             entropy = -torch.sum(probs * log_probs, dim=-1)  # shape: (batch,)
 
-        batch_size = min(logits.shape[0], len(output_token_ids))
         for i in range(batch_size):
-            tok_list = output_token_ids[i]
-            key = id(tok_list)
-            step = len(tok_list)
+            key = id(output_token_ids[i])
+            state = self._entropy_state.get(key)
+            if state is None:
+                continue
 
-            # Skip prefill steps (no meaningful entropy yet).
+            cfg = state["cfg"]
+            if not cfg["enabled"]:
+                continue
+
+            step = len(output_token_ids[i])
+            # Skip early steps (no meaningful entropy yet).
             if step < 2:
                 continue
 
             h = float(entropy[i].item())
 
-            state = self._entropy_state.get(key)
-            if state is None:
-                state = {"consecutive_oob": 0, "last_step": step}
-                self._entropy_state[key] = state
+            if step % 100 == 0:
+                logger.debug(
+                    "Entropy monitor: step=%d, entropy=%.3f, consecutive_oob=%d",
+                    step,
+                    h,
+                    state["consecutive_oob"],
+                )
 
-            # Check if entropy is out of bounds.
-            out_of_bounds = h > threshold_high or h < threshold_low
+            out_of_bounds = h > cfg["threshold_high"] or h < cfg["threshold_low"]
             if out_of_bounds:
                 state["consecutive_oob"] += 1
             else:
                 state["consecutive_oob"] = 0
             state["last_step"] = step
 
-            # Trigger: force EOS.
-            if state["consecutive_oob"] >= window:
+            if state["consecutive_oob"] >= cfg["window"]:
                 logger.warning(
                     "Entropy guardrail triggered at step %d (entropy=%.3f, "
                     "consecutive_oob=%d, thresholds=[%.2f, %.2f]). Forcing EOS.",
                     step,
                     h,
                     state["consecutive_oob"],
-                    threshold_low,
-                    threshold_high,
+                    cfg["threshold_low"],
+                    cfg["threshold_high"],
                 )
                 logits[i, :] = float("-inf")
                 logits[i, eos_id] = 100.0
+                # Reset counter so we don't log on every subsequent step.
+                state["consecutive_oob"] = 0
 
-        # Prune stale entries (requests that finished without cleanup).
+        # Prune stale entries (requests that finished).
         if len(self._entropy_state) > batch_size * 2 + 10:
             active_keys = {id(output_token_ids[i]) for i in range(batch_size)}
             stale = [k for k in self._entropy_state if k not in active_keys]
@@ -606,23 +647,31 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
     # -------------------- entropy guardrail config --------------------
 
     def _update_entropy_config_from_info(self, info_dict: dict[str, Any]) -> None:
-        """Update entropy guardrail defaults from per-request additional_information."""
+        """Stage per-request entropy guardrail config for consumption by compute_logits.
+
+        Builds a config dict from per-request additional_information, falling back
+        to model-level defaults for any unset parameters. The config is appended to
+        ``_entropy_config_staging`` and consumed in batch order by
+        ``_apply_entropy_guardrail`` when initializing new per-request state.
+        """
 
         def _first(val: Any) -> Any:
             return val[0] if isinstance(val, list) and val else val
 
+        cfg = dict(self._entropy_defaults)  # copy defaults
         eg = _first(info_dict.get("entropy_guardrail"))
         if eg is not None:
-            self._entropy_defaults["enabled"] = bool(eg)
+            cfg["enabled"] = bool(eg)
         eth = _first(info_dict.get("entropy_threshold_high"))
         if eth is not None:
-            self._entropy_defaults["threshold_high"] = float(eth)
+            cfg["threshold_high"] = float(eth)
         etl = _first(info_dict.get("entropy_threshold_low"))
         if etl is not None:
-            self._entropy_defaults["threshold_low"] = float(etl)
+            cfg["threshold_low"] = float(etl)
         ew = _first(info_dict.get("entropy_window"))
         if ew is not None:
-            self._entropy_defaults["window"] = int(ew)
+            cfg["window"] = int(ew)
+        self._entropy_config_staging.append(cfg)
 
     # -------------------- preprocess / postprocess --------------------
 
