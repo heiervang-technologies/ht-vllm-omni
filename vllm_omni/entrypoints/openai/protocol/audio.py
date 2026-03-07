@@ -57,10 +57,6 @@ class OpenAICreateSpeechRequest(BaseModel):
         "When provided, skips speaker encoder extraction from ref_audio. "
         "Implies x_vector_only_mode=True. Mutually exclusive with ref_audio.",
     )
-    stream: bool = Field(
-        default=False,
-        description="Stream audio chunks progressively as they are generated.",
-    )
     max_new_tokens: int | None = Field(
         default=None,
         description="Maximum tokens to generate",
