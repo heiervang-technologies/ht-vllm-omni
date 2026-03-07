@@ -329,6 +329,17 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
 
         self._eos_logit_bias: float = 0.0
 
+        # Entropy guardrail: per-request state keyed by id(output_token_ids list).
+        # Each entry: {"consecutive_oob": int, "config": dict}
+        self._entropy_state: dict[int, dict[str, Any]] = {}
+        # Default guardrail config (can be overridden per-request via additional_information).
+        self._entropy_defaults: dict[str, Any] = {
+            "enabled": False,
+            "threshold_high": 4.5,
+            "threshold_low": 0.5,
+            "window": 5,
+        }
+
         self.have_multimodal_outputs = True
         self.has_preprocess = True
         self.has_postprocess = True
@@ -431,6 +442,92 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             if 0 <= eos_id < logits.shape[-1]:
                 logits[:, eos_id] = logits[:, eos_id] + self._eos_logit_bias
 
+        # Entropy guardrail: detect degeneration and force EOS.
+        logits = self._apply_entropy_guardrail(logits, sampling_metadata)
+
+        return logits
+
+    def _apply_entropy_guardrail(self, logits: torch.Tensor, sampling_metadata: Any) -> torch.Tensor:
+        """Monitor per-request entropy and force EOS when degeneration is detected.
+
+        Degeneration is signaled by entropy consistently leaving a healthy range:
+        - Spike (above threshold_high): model is lost/uncertain
+        - Collapse (below threshold_low): model is stuck in a loop
+
+        When consecutive out-of-range steps exceed the window size, the EOS token
+        logit is set very high and all others suppressed, forcing the sampler to
+        pick EOS and terminate generation cleanly.
+        """
+        cfg = self._entropy_defaults
+        if not cfg["enabled"]:
+            return logits
+
+        output_token_ids = getattr(sampling_metadata, "output_token_ids", None)
+        if not output_token_ids:
+            return logits
+
+        eos_id = self._codec_eos_token_id
+        if eos_id < 0 or eos_id >= logits.shape[-1]:
+            return logits
+
+        threshold_high = cfg["threshold_high"]
+        threshold_low = cfg["threshold_low"]
+        window = cfg["window"]
+
+        # Compute entropy for each batch element.
+        # Use only the valid (non -inf) logits for stable softmax.
+        with torch.no_grad():
+            probs = F.softmax(logits, dim=-1)
+            # Shannon entropy in nats: H = -sum(p * ln(p))
+            log_probs = torch.log(probs + 1e-10)
+            entropy = -torch.sum(probs * log_probs, dim=-1)  # shape: (batch,)
+
+        batch_size = min(logits.shape[0], len(output_token_ids))
+        for i in range(batch_size):
+            tok_list = output_token_ids[i]
+            key = id(tok_list)
+            step = len(tok_list)
+
+            # Skip prefill steps (no meaningful entropy yet).
+            if step < 2:
+                continue
+
+            h = float(entropy[i].item())
+
+            state = self._entropy_state.get(key)
+            if state is None:
+                state = {"consecutive_oob": 0, "last_step": step}
+                self._entropy_state[key] = state
+
+            # Check if entropy is out of bounds.
+            out_of_bounds = h > threshold_high or h < threshold_low
+            if out_of_bounds:
+                state["consecutive_oob"] += 1
+            else:
+                state["consecutive_oob"] = 0
+            state["last_step"] = step
+
+            # Trigger: force EOS.
+            if state["consecutive_oob"] >= window:
+                logger.warning(
+                    "Entropy guardrail triggered at step %d (entropy=%.3f, "
+                    "consecutive_oob=%d, thresholds=[%.2f, %.2f]). Forcing EOS.",
+                    step,
+                    h,
+                    state["consecutive_oob"],
+                    threshold_low,
+                    threshold_high,
+                )
+                logits[i, :] = float("-inf")
+                logits[i, eos_id] = 100.0
+
+        # Prune stale entries (requests that finished without cleanup).
+        if len(self._entropy_state) > batch_size * 2 + 10:
+            active_keys = {id(output_token_ids[i]) for i in range(batch_size)}
+            stale = [k for k in self._entropy_state if k not in active_keys]
+            for k in stale:
+                del self._entropy_state[k]
+
         return logits
 
     # -------------------- Omni multimodal output plumbing --------------------
@@ -491,6 +588,27 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             mm["codec_streaming"] = torch.cat(codec_streaming_list, dim=0)[:span_len]
         return OmniOutput(text_hidden_states=hidden, multimodal_outputs=mm)
 
+    # -------------------- entropy guardrail config --------------------
+
+    def _update_entropy_config_from_info(self, info_dict: dict[str, Any]) -> None:
+        """Update entropy guardrail defaults from per-request additional_information."""
+
+        def _first(val: Any) -> Any:
+            return val[0] if isinstance(val, list) and val else val
+
+        eg = _first(info_dict.get("entropy_guardrail"))
+        if eg is not None:
+            self._entropy_defaults["enabled"] = bool(eg)
+        eth = _first(info_dict.get("entropy_threshold_high"))
+        if eth is not None:
+            self._entropy_defaults["threshold_high"] = float(eth)
+        etl = _first(info_dict.get("entropy_threshold_low"))
+        if etl is not None:
+            self._entropy_defaults["threshold_low"] = float(etl)
+        ew = _first(info_dict.get("entropy_window"))
+        if ew is not None:
+            self._entropy_defaults["window"] = int(ew)
+
     # -------------------- preprocess / postprocess --------------------
 
     def preprocess(
@@ -506,6 +624,9 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             for k, v in additional_information.items():
                 merged.setdefault(k, v)
             info_dict = merged
+
+        # Update entropy guardrail config from per-request additional_information.
+        self._update_entropy_config_from_info(info_dict)
 
         span_len = int(input_ids.shape[0])
         if span_len <= 0:

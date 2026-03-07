@@ -540,6 +540,16 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if request.initial_codec_chunk_frames is not None:
             params["initial_codec_chunk_frames"] = [request.initial_codec_chunk_frames]
 
+        # Entropy guardrail parameters
+        if request.entropy_guardrail is not None:
+            params["entropy_guardrail"] = [request.entropy_guardrail]
+        if request.entropy_threshold_high is not None:
+            params["entropy_threshold_high"] = [request.entropy_threshold_high]
+        if request.entropy_threshold_low is not None:
+            params["entropy_threshold_low"] = [request.entropy_threshold_low]
+        if request.entropy_window is not None:
+            params["entropy_window"] = [request.entropy_window]
+
         # VoiceDesign requires non_streaming_mode (match offline script behaviour).
         # CustomVoice and Base rely on the model default (True and False respectively).
         if params["task_type"][0] == "VoiceDesign":
