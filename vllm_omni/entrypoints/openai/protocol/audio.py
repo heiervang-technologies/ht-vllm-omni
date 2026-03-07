@@ -75,6 +75,28 @@ class OpenAICreateSpeechRequest(BaseModel):
         description="Per-request initial chunk size override. If null, computed dynamically based on server load.",
     )
 
+    # Entropy guardrail parameters
+    entropy_guardrail: bool | None = Field(
+        default=None,
+        description="Enable entropy-based degeneration detection. When triggered, "
+        "generation stops early to prevent noise output. Default: server config.",
+    )
+    entropy_threshold_high: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Upper entropy threshold (nats). Consecutive steps above this trigger halt. Default: 4.5.",
+    )
+    entropy_threshold_low: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Lower entropy threshold (nats). Consecutive steps below this trigger halt. Default: 0.5.",
+    )
+    entropy_window: int | None = Field(
+        default=None,
+        ge=1,
+        description="Number of consecutive out-of-range steps before triggering. Default: 5.",
+    )
+
     @field_validator("stream_format")
     @classmethod
     def validate_stream_format(cls, v: str) -> str:
