@@ -606,6 +606,14 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if task_type == "VoiceDesign" and not request.instructions:
             return "VoiceDesign task requires 'instructions' to describe the voice"
 
+        # Validate streaming constraints
+        if request.stream:
+            fmt = (request.response_format or "wav").lower()
+            if fmt not in ("wav", "pcm"):
+                return f"Streaming only supports 'wav' and 'pcm' response formats, got '{fmt}'"
+            if request.speed is not None and request.speed != 1.0:
+                return "Streaming does not support speed adjustment (speed must be 1.0)"
+
         # Validate instructions length (using cached value from initialization)
         if request.instructions and len(request.instructions) > self._max_instructions_length:
             return f"Instructions too long (max {self._max_instructions_length} characters)"
@@ -720,17 +728,43 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
     def _extract_audio_output(res) -> tuple[dict | None, str | None]:
         """Return (audio_output dict, audio key) or (None, None).
 
+        Audio data is attached to CompletionOutput.multimodal_output inside
+        request_output.outputs[] by the output processor.  This method checks
+        there first (via the OmniRequestOutput property, then via a direct
+        walk of outputs[]) before falling back to top-level attributes.
+
         Returns the raw dict so callers can apply their own extraction strategy:
         streaming needs per-chunk delta slicing; non-streaming needs full concatenation.
         """
+        _AUDIO_KEYS = ("audio", "model_outputs")
+
+        def _find_key(mm: dict) -> str | None:
+            for k in _AUDIO_KEYS:
+                if k in mm:
+                    return k
+            return None
+
+        # 1. Try the OmniRequestOutput.multimodal_output property which
+        #    already checks request_output.outputs[].multimodal_output.
         mm = getattr(res, "multimodal_output", None)
-        if not mm:
-            ro = getattr(res, "request_output", None)
-            mm = getattr(ro, "multimodal_output", None) if ro else None
-        if not mm:
-            return None, None
-        key = "audio" if "audio" in mm else ("model_outputs" if "model_outputs" in mm else None)
-        return mm, key
+        if mm is not None and mm:  # not None AND not empty dict
+            key = _find_key(mm)
+            if key is not None:
+                return mm, key
+
+        # 2. Direct walk: check CompletionOutput.multimodal_output on each
+        #    output inside request_output.outputs[].  This covers cases where
+        #    the property returns {} (default) but audio lives on a specific
+        #    CompletionOutput, or when res is a raw RequestOutput.
+        ro = getattr(res, "request_output", None) or res
+        for output in getattr(ro, "outputs", []):
+            mm = getattr(output, "multimodal_output", None)
+            if mm is not None and mm:
+                key = _find_key(mm)
+                if key is not None:
+                    return mm, key
+
+        return None, None
 
     def _build_tts_params(self, request: OpenAICreateSpeechRequest) -> dict[str, Any]:
         """Build TTS parameters from request.
@@ -931,6 +965,41 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return error_check_ret
 
         try:
+            if self._is_tts:
+                # Validate TTS parameters
+                validation_error = self._validate_tts_request(request)
+                if validation_error:
+                    return self.create_error_response(validation_error)
+
+                tts_params = self._build_tts_params(request)
+                if request.ref_audio is not None:
+                    wav_list, sr = await self._resolve_ref_audio(request.ref_audio)
+                    tts_params["ref_audio"] = [[wav_list, sr]]
+
+                # Prompt length must match model-side embeddings; values are placeholders.
+                ph_len = self._estimate_prompt_len(tts_params)
+                prompt = {"prompt_token_ids": [1] * ph_len, "additional_information": tts_params}
+            else:
+                tts_params = {}
+                prompt = {"prompt": request.input}
+
+            logger.info(
+                "TTS speech request %s: text=%r, task_type=%s, stream=%s",
+                request_id,
+                request.input[:50] + "..." if len(request.input) > 50 else request.input,
+                tts_params.get("task_type", ["unknown"])[0],
+                request.stream,
+            )
+
+            sampling_params_list = self.engine_client.default_sampling_params_list
+
+            generator = self.engine_client.generate(
+                prompt=prompt,
+                request_id=request_id,
+                sampling_params_list=sampling_params_list,
+                output_modalities=["audio"],
+            )
+
             if request.stream:
                 # Determine response format and media type for streaming
                 response_format = (request.response_format or "wav").lower()
@@ -956,8 +1025,55 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     media_type=media_type,
                 )
 
-            audio_bytes, media_type = await self._generate_audio_bytes(request)
-            return Response(content=audio_bytes, media_type=media_type)
+            # Non-streaming: collect final output
+            final_output: OmniRequestOutput | None = None
+            async for res in generator:
+                final_output = res
+
+            if final_output is None:
+                return self.create_error_response("No output generated from the model.")
+
+            audio_output, audio_key = self._extract_audio_output(final_output)
+            if audio_key is None:
+                return self.create_error_response("TTS model did not produce audio output.")
+
+            audio_tensor = audio_output[audio_key]
+            sr_raw = audio_output.get("sr", 24000)
+            sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw
+            sample_rate = sr_val.item() if hasattr(sr_val, "item") else int(sr_val)
+
+            # async_chunk mode accumulates chunks as a list; concat first.
+            if isinstance(audio_tensor, list):
+                audio_tensor = torch.cat(audio_tensor, dim=-1)
+            if hasattr(audio_tensor, "float"):
+                audio_tensor = audio_tensor.float().detach().cpu().numpy()
+            if audio_tensor.ndim > 1:
+                audio_tensor = audio_tensor.squeeze()
+
+            # Apply speed adjustment if needed
+            speed = request.speed or 1.0
+            if speed != 1.0:
+                audio_obj = CreateAudio(
+                    audio_tensor=audio_tensor,
+                    sample_rate=sample_rate,
+                    response_format=request.response_format or "wav",
+                    speed=speed,
+                    stream_format=request.stream_format,
+                    base64_encode=False,
+                )
+                audio_response: AudioResponse = self.create_audio(audio_obj)
+                return Response(content=audio_response.audio_data, media_type=audio_response.media_type)
+
+            audio_obj = CreateAudio(
+                audio_tensor=audio_tensor,
+                sample_rate=sample_rate,
+                response_format=request.response_format or "wav",
+                speed=1.0,
+                stream_format=request.stream_format,
+                base64_encode=False,
+            )
+            audio_response = self.create_audio(audio_obj)
+            return Response(content=audio_response.audio_data, media_type=audio_response.media_type)
 
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
@@ -966,3 +1082,107 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         except Exception as e:
             logger.exception("Speech generation failed: %s", e)
             return self.create_error_response(f"Speech generation failed: {e}")
+
+    async def _stream_progressive_audio(
+        self,
+        generator,
+        response_format: str,
+    ):
+        """Stream audio chunks progressively as they arrive from the model.
+
+        The output processor accumulates multimodal tensors, so each yielded
+        output contains ALL audio chunks produced so far (not just the latest
+        one).  We track a cursor to yield only new chunks.
+
+        For WAV format: yields a WAV header with max-size placeholder first,
+        then raw PCM chunks as they become available.
+        For PCM format: yields raw 16-bit signed PCM chunks directly.
+        """
+        header_sent = False
+        sample_rate = 24000  # Default, updated from first chunk
+        chunks_yielded = 0  # Cursor: how many audio chunks we've already sent
+
+        async for output in generator:
+            audio_output, audio_key = self._extract_audio_output(output)
+            if audio_key is None:
+                continue
+
+            sr_raw = audio_output.get("sr", 24000)
+            if isinstance(sr_raw, list) and sr_raw:
+                sr_raw = sr_raw[-1]
+            if hasattr(sr_raw, "item"):
+                sr_raw = sr_raw.item()
+            sample_rate = int(sr_raw)
+
+            # The output processor accumulates audio tensors in a list.
+            # First output: audio_data is a single tensor.
+            # Subsequent outputs: audio_data is [tensor1, tensor2, ...].
+            audio_data = audio_output[audio_key]
+            if isinstance(audio_data, list) and audio_data and hasattr(audio_data[0], "float"):
+                # List of tensors from accumulation - get only new ones
+                new_tensors = audio_data[chunks_yielded:]
+                chunks_yielded = len(audio_data)
+            elif isinstance(audio_data, list) and audio_data and isinstance(audio_data[0], list):
+                # List of lists (deserialized tensors) - get only new ones
+                new_tensors = audio_data[chunks_yielded:]
+                chunks_yielded = len(audio_data)
+            else:
+                # Single tensor — only yield on the first occurrence
+                if chunks_yielded == 0:
+                    new_tensors = [audio_data]
+                    chunks_yielded = 1
+                else:
+                    new_tensors = []
+
+            for audio_tensor in new_tensors:
+                # Convert to numpy - after ZMQ deserialization tensors
+                # may arrive as lists, torch tensors, or numpy arrays.
+                if isinstance(audio_tensor, list):
+                    audio_tensor = np.array(audio_tensor, dtype=np.float32)
+                elif hasattr(audio_tensor, "float"):
+                    audio_tensor = audio_tensor.float().detach().cpu().numpy()
+                if hasattr(audio_tensor, "ndim") and audio_tensor.ndim > 1:
+                    audio_tensor = audio_tensor.squeeze()
+
+                if len(audio_tensor) == 0:
+                    continue
+
+                # Convert float audio to int16 PCM
+                audio_float = audio_tensor.astype(np.float32)
+                audio_float = np.clip(audio_float, -1.0, 1.0)
+                pcm_chunk = (audio_float * 32767).astype(np.int16).tobytes()
+
+                if response_format == "wav" and not header_sent:
+                    yield _make_wav_header(sample_rate, 0x7FFFFFFF)
+                    header_sent = True
+
+                yield pcm_chunk
+
+
+_STREAM_MEDIA_TYPES = {
+    "wav": "audio/wav",
+    "pcm": "audio/pcm",
+}
+
+
+def _make_wav_header(sample_rate: int, data_size: int, num_channels: int = 1, bits_per_sample: int = 16) -> bytes:
+    """Build a standard WAV (RIFF) header for PCM data."""
+    byte_rate = sample_rate * num_channels * bits_per_sample // 8
+    block_align = num_channels * bits_per_sample // 8
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,  # file size - 8
+        b"WAVE",
+        b"fmt ",
+        16,  # fmt chunk size
+        1,  # PCM format
+        num_channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data",
+        data_size,
+    )
+    return header
