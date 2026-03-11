@@ -215,23 +215,42 @@ def test_app(mocker: MockerFixture):
         uploaded_voices = []
         if hasattr(speech_server, "uploaded_speakers"):
             for voice_name, info in speech_server.uploaded_speakers.items():
-                uploaded_voices.append(
-                    {
-                        "name": info.get("name", voice_name),
-                        "consent": info.get("consent", ""),
-                        "created_at": info.get("created_at", 0),
-                        "file_size": info.get("file_size", 0),
-                        "mime_type": info.get("mime_type", ""),
-                    }
-                )
+                voice_entry = {
+                    "name": info.get("name", voice_name),
+                    "consent": info.get("consent", ""),
+                    "created_at": info.get("created_at", 0),
+                    "embedding_source": info.get("embedding_source", "audio"),
+                }
+                if info.get("embedding_source") == "direct":
+                    voice_entry["embedding_dim"] = info.get("embedding_dim", 0)
+                else:
+                    voice_entry["file_size"] = info.get("file_size", 0)
+                    voice_entry["mime_type"] = info.get("mime_type", "")
+                uploaded_voices.append(voice_entry)
         return {"voices": speakers, "uploaded_voices": uploaded_voices}
 
     app.add_api_route("/v1/audio/voices", list_voices, methods=["GET"])
 
     # Add upload_voice endpoint
-    async def upload_voice(audio_sample: UploadFile = File(...), consent: str = Form(...), name: str = Form(...)):
+    async def upload_voice(
+        audio_sample: UploadFile | None = File(None),
+        consent: str = Form(...),
+        name: str = Form(...),
+        speaker_embedding: str | None = Form(None),
+    ):
         try:
-            result = await speech_server.upload_voice(audio_sample, consent, name)
+            import json as _json
+
+            parsed_embedding = None
+            if speaker_embedding is not None:
+                parsed_embedding = _json.loads(speaker_embedding)
+
+            result = await speech_server.upload_voice(
+                audio_file=audio_sample,
+                consent=consent,
+                name=name,
+                speaker_embedding=parsed_embedding,
+            )
             return {"success": True, "voice": result}
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -432,13 +451,13 @@ class TestSpeechAPI:
         response = client.post("/v1/audio/voices", files=files, data=data)
         assert response.status_code == 422  # Validation error
 
-        # Missing file
+        # Missing both file and embedding — handler rejects with 400
         data = {
             "consent": "user_consent_123",
             "name": "test_voice6",
         }
         response = client.post("/v1/audio/voices", data=data)
-        assert response.status_code == 422  # Validation error
+        assert response.status_code == 400
 
     def test_delete_voice_success(self, client):
         """Test successful voice deletion."""
@@ -474,6 +493,112 @@ class TestSpeechAPI:
         assert response.status_code == 404
         result = response.json()
         assert "not found" in result["detail"]
+
+    def test_upload_voice_with_speaker_embedding(self, client):
+        """Test uploading a voice with a pre-computed speaker embedding."""
+        import json
+
+        embedding = [0.1] * 1024
+        data = {
+            "consent": "user_consent_emb",
+            "name": "emb_voice",
+            "speaker_embedding": json.dumps(embedding),
+        }
+        response = client.post("/v1/audio/voices", data=data)
+        assert response.status_code == 200
+        result = response.json()
+        assert result["success"] is True
+        voice = result["voice"]
+        assert voice["name"] == "emb_voice"
+        assert voice["embedding_source"] == "direct"
+        assert voice["embedding_dim"] == 1024
+        # Clean up
+        client.delete("/v1/audio/voices/emb_voice")
+
+    def test_upload_voice_embedding_and_audio_mutually_exclusive(self, client):
+        """Test that audio_sample and speaker_embedding are mutually exclusive."""
+        import json
+
+        embedding = [0.1] * 1024
+        audio_content = b"fake audio content"
+        response = client.post(
+            "/v1/audio/voices",
+            files={"audio_sample": ("test.wav", audio_content, "audio/wav")},
+            data={
+                "consent": "user_consent",
+                "name": "conflict_voice",
+                "speaker_embedding": json.dumps(embedding),
+            },
+        )
+        assert response.status_code == 400
+
+    def test_upload_voice_neither_audio_nor_embedding(self, client):
+        """Test that either audio_sample or speaker_embedding must be provided."""
+        data = {
+            "consent": "user_consent",
+            "name": "empty_voice",
+        }
+        response = client.post("/v1/audio/voices", data=data)
+        assert response.status_code == 400
+
+    def test_upload_voice_embedding_empty_list(self, client):
+        """Test that empty speaker_embedding is rejected."""
+        import json
+
+        data = {
+            "consent": "user_consent",
+            "name": "empty_emb_voice",
+            "speaker_embedding": json.dumps([]),
+        }
+        response = client.post("/v1/audio/voices", data=data)
+        assert response.status_code == 400
+
+    def test_upload_voice_embedding_invalid_json(self, client):
+        """Test that malformed JSON in speaker_embedding is rejected."""
+        data = {
+            "consent": "user_consent",
+            "name": "bad_json_voice",
+            "speaker_embedding": "not valid json [",
+        }
+        response = client.post("/v1/audio/voices", data=data)
+        assert response.status_code == 400
+
+    def test_upload_voice_embedding_non_numeric(self, client):
+        """Test that non-numeric values in speaker_embedding are rejected."""
+        import json
+
+        data = {
+            "consent": "user_consent",
+            "name": "non_numeric_voice",
+            "speaker_embedding": json.dumps(["a", "b", "c"]),
+        }
+        response = client.post("/v1/audio/voices", data=data)
+        assert response.status_code == 400
+
+    def test_upload_voice_embedding_listed_in_voices(self, client):
+        """Test that embedding-uploaded voice appears in GET /v1/audio/voices."""
+        import json
+
+        embedding = [0.1] * 1024
+        data = {
+            "consent": "consent_list_test",
+            "name": "listed_emb_voice",
+            "speaker_embedding": json.dumps(embedding),
+        }
+        response = client.post("/v1/audio/voices", data=data)
+        assert response.status_code == 200
+
+        # Check listing
+        response = client.get("/v1/audio/voices")
+        assert response.status_code == 200
+        result = response.json()
+        uploaded = result.get("uploaded_voices", [])
+        emb_voices = [v for v in uploaded if v["name"] == "listed_emb_voice"]
+        assert len(emb_voices) == 1
+        assert emb_voices[0]["embedding_source"] == "direct"
+        assert emb_voices[0]["embedding_dim"] == 1024
+        # Clean up
+        client.delete("/v1/audio/voices/listed_emb_voice")
 
 
 class TestTTSMethods:
@@ -604,12 +729,12 @@ class TestTTSMethods:
         req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb, x_vector_only_mode=True)
         assert speech_server._validate_tts_request(req) is None
 
-    def test_speaker_embedding_requires_x_vector_only_mode(self, speech_server):
-        """speaker_embedding without x_vector_only_mode fails ref_text validation."""
+    def test_speaker_embedding_implies_x_vector_only_mode(self, speech_server):
+        """speaker_embedding implicitly enables x_vector_only_mode, skipping ref_text check."""
         emb = [0.1] * 1024
         req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb)
         result = speech_server._validate_tts_request(req)
-        assert "x_vector_only_mode" in result
+        assert result is None  # No error — ref_text not required
 
     def test_speaker_embedding_wrong_task_type(self, speech_server):
         """speaker_embedding is only valid for Base task."""
@@ -623,11 +748,10 @@ class TestTTSMethods:
     def test_speaker_embedding_mutually_exclusive_with_ref_audio(self, speech_server):
         """speaker_embedding and ref_audio cannot both be provided."""
         emb = [0.1] * 1024
-        req = OpenAICreateSpeechRequest(
-            input="Hello", task_type="Base", speaker_embedding=emb, ref_audio="data:audio/wav;base64,abc"
-        )
-        result = speech_server._validate_tts_request(req)
-        assert "mutually exclusive" in result
+        with pytest.raises(ValidationError, match="mutually exclusive"):
+            OpenAICreateSpeechRequest(
+                input="Hello", task_type="Base", speaker_embedding=emb, ref_audio="data:audio/wav;base64,abc"
+            )
 
     def test_speaker_embedding_empty_list_rejected(self, speech_server):
         """Empty speaker_embedding list is rejected."""
@@ -711,12 +835,13 @@ class TestTTSMethods:
 
     def test_build_tts_params_with_uploaded_voice(self, speech_server):
         """Test _build_tts_params auto-sets ref_audio for uploaded voices."""
-        # Mock an uploaded speaker
+        # Mock an uploaded speaker (audio-based)
         speech_server.uploaded_speakers = {
             "custom_voice": {
                 "name": "custom_voice",
                 "file_path": "/tmp/voice_samples/custom_voice_consent_123.wav",
                 "mime_type": "audio/wav",
+                "embedding_source": "audio",
             }
         }
         speech_server.supported_speakers = {"ryan", "vivian", "custom_voice"}
@@ -735,6 +860,37 @@ class TestTTSMethods:
             assert "x_vector_only_mode" in params
             assert params["x_vector_only_mode"] == [True]
             mock_get_audio.assert_called_once_with("custom_voice")
+
+    def test_build_tts_params_with_embedding_uploaded_voice(self, speech_server, tmp_path):
+        """Test _build_tts_params injects embedding for embedding-based uploaded voices."""
+        import torch
+        from safetensors.torch import save_file
+
+        # Create a safetensors cache file with a speaker embedding
+        embedding = [0.5] * 1024
+        cache_file = tmp_path / "emb_voice.safetensors"
+        save_file({"speaker_embedding": torch.tensor(embedding, dtype=torch.float32)}, str(cache_file))
+
+        speech_server.uploaded_speakers = {
+            "emb_voice": {
+                "name": "emb_voice",
+                "embedding_source": "direct",
+                "cache_status": "ready",
+                "cache_file": str(cache_file),
+            }
+        }
+        speech_server.supported_speakers = {"ryan", "vivian", "emb_voice"}
+
+        req = OpenAICreateSpeechRequest(input="Hello", voice="emb_voice", task_type="Base")
+        params = speech_server._build_tts_params(req)
+
+        # Verify voice_clone_prompt was set from embedding
+        assert "voice_clone_prompt" in params
+        assert "ref_spk_embedding" in params["voice_clone_prompt"][0]
+        assert len(params["voice_clone_prompt"][0]["ref_spk_embedding"]) == 1024
+        assert params["x_vector_only_mode"] == [True]
+        # ref_audio should NOT be set
+        assert "ref_audio" not in params
 
     def test_build_tts_params_without_uploaded_voice(self, speech_server):
         """Test _build_tts_params does not auto-set ref_audio for non-uploaded voices."""

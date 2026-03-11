@@ -295,8 +295,132 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             logger.error(f"Could not read audio file for voice {voice_name}: {e}")
             return None
 
-    async def upload_voice(self, audio_file: UploadFile, consent: str, name: str) -> dict:
-        """Upload a new voice sample."""
+    async def upload_voice(
+        self,
+        audio_file: UploadFile | None,
+        consent: str,
+        name: str,
+        speaker_embedding: list[float] | None = None,
+    ) -> dict:
+        """Upload a new voice sample or register a pre-computed speaker embedding.
+
+        Accepts either an audio file or a speaker embedding (mutually exclusive).
+        When a speaker embedding is provided, it is stored as a safetensors cache
+        file and marked as immediately ready (no speaker encoder extraction needed).
+        """
+        if audio_file is not None and speaker_embedding is not None:
+            raise ValueError("'audio_sample' and 'speaker_embedding' are mutually exclusive")
+        if audio_file is None and speaker_embedding is None:
+            raise ValueError("Either 'audio_sample' or 'speaker_embedding' must be provided")
+
+        # Normalize voice name
+        voice_name_lower = name.lower()
+
+        # Check if voice already exists
+        if voice_name_lower in self.uploaded_speakers:
+            raise ValueError(f"Voice '{name}' already exists")
+
+        timestamp = int(time.time())
+
+        if speaker_embedding is not None:
+            return await self._upload_voice_from_embedding(name, consent, speaker_embedding, timestamp)
+        else:
+            return await self._upload_voice_from_audio(name, consent, audio_file, timestamp)
+
+    async def _upload_voice_from_embedding(
+        self,
+        name: str,
+        consent: str,
+        embedding: list[float],
+        timestamp: int,
+    ) -> dict:
+        """Register a voice from a pre-computed speaker embedding."""
+        import math
+
+        from safetensors.torch import save_file
+
+        voice_name_lower = name.lower()
+
+        # Validate embedding dimensions
+        emb_len = len(embedding)
+        if emb_len == 0:
+            raise ValueError("'speaker_embedding' must be a non-empty list of floats")
+
+        # Validate all values are numeric and finite
+        for i, x in enumerate(embedding):
+            if not isinstance(x, (int, float)):
+                raise ValueError(f"'speaker_embedding' values must be numbers, got {type(x).__name__} at index {i}")
+            if not math.isfinite(x):
+                raise ValueError("'speaker_embedding' values must be finite (no NaN or Inf)")
+        expected_dims = {1024, 2048}
+        if emb_len not in expected_dims:
+            logger.warning(
+                "speaker_embedding has %d dimensions; expected 1024 (0.6B model) or 2048 (1.7B model).",
+                emb_len,
+            )
+
+        # Save embedding as safetensors
+        sanitized_name = _sanitize_filename(name)
+        sanitized_consent = _sanitize_filename(consent)
+        cache_filename = f"{sanitized_name}_{sanitized_consent}_{timestamp}.safetensors"
+        cache_path = self.uploaded_speakers_dir / cache_filename
+
+        if not _validate_path_within_directory(cache_path, self.uploaded_speakers_dir):
+            raise ValueError("Invalid file path: potential path traversal attack detected")
+
+        try:
+            emb_tensor = torch.tensor(embedding, dtype=torch.float32)
+            save_file({"speaker_embedding": emb_tensor}, str(cache_path))
+        except Exception as e:
+            raise ValueError(f"Failed to save speaker embedding: {e}")
+
+        # Create speaker data
+        speaker_data = {
+            "name": name,
+            "consent": consent,
+            "file_path": None,  # No audio file
+            "created_at": timestamp,
+            "mime_type": None,
+            "original_filename": None,
+            "file_size": None,
+            "embedding_source": "direct",
+            "embedding_dim": emb_len,
+            "cache_status": "ready",
+            "cache_file": str(cache_path),
+            "cache_generated_at": timestamp,
+        }
+
+        success = self.metadata_manager.create_speaker(voice_name_lower, speaker_data)
+        if not success:
+            try:
+                cache_path.unlink()
+            except Exception:
+                pass
+            raise ValueError(f"Failed to create metadata for voice '{name}' (possibly already exists)")
+
+        self.uploaded_speakers[voice_name_lower] = speaker_data
+        self.supported_speakers.add(voice_name_lower)
+
+        logger.info(f"Registered voice '{name}' from speaker embedding ({emb_len}-dim)")
+
+        return {
+            "name": name,
+            "consent": consent,
+            "created_at": timestamp,
+            "embedding_source": "direct",
+            "embedding_dim": emb_len,
+        }
+
+    async def _upload_voice_from_audio(
+        self,
+        name: str,
+        consent: str,
+        audio_file: UploadFile,
+        timestamp: int,
+    ) -> dict:
+        """Upload a voice from an audio file (original behavior)."""
+        voice_name_lower = name.lower()
+
         # Validate file size (max 10MB)
         MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
         audio_file.file.seek(0, 2)  # Seek to end
@@ -343,19 +467,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if mime_type not in allowed_mime_types:
             raise ValueError(f"Unsupported MIME type: {mime_type}. Allowed: {allowed_mime_types}")
 
-        # Normalize voice name
-        voice_name_lower = name.lower()
-
-        # Check if voice already exists
-        if voice_name_lower in self.uploaded_speakers:
-            raise ValueError(f"Voice '{name}' already exists")
-
         # Sanitize name and consent to prevent path traversal
         sanitized_name = _sanitize_filename(name)
         sanitized_consent = _sanitize_filename(consent)
 
         # Generate filename with sanitized inputs
-        timestamp = int(time.time())
         file_suffix = Path(audio_file.filename).suffix
         file_ext = file_suffix[1:] if file_suffix and len(file_suffix) > 1 else "wav"
         # Sanitize file extension as well
@@ -387,6 +503,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             "mime_type": mime_type,
             "original_filename": audio_file.filename,
             "file_size": file_size,
+            "embedding_source": "audio",
             "cache_status": "pending",  # The initial cache state is pending.
             "cache_file": None,  # The initial cache file is empty.
             "cache_generated_at": None,  # The initial cache generation time is empty.
@@ -415,6 +532,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             "created_at": timestamp,
             "mime_type": mime_type,
             "file_size": file_size,
+            "embedding_source": "audio",
         }
 
     async def delete_voice(self, name: str) -> bool:
@@ -491,11 +609,10 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 return f"Invalid speaker '{request.voice}'. Supported: {', '.join(sorted(self.supported_speakers))}"
 
         # Validate speaker_embedding constraints
+        # (mutual exclusivity with ref_audio is enforced by Pydantic model validator)
         if request.speaker_embedding is not None:
             if task_type != "Base":
                 return "'speaker_embedding' is only valid for Base task"
-            if request.ref_audio is not None:
-                return "'speaker_embedding' and 'ref_audio' are mutually exclusive"
             if not request.speaker_embedding:
                 return "'speaker_embedding' must be a non-empty list of floats"
             emb_len = len(request.speaker_embedding)
@@ -522,8 +639,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 ):
                     return "ref_audio must be a URL (http/https), base64 data URL (data:...), or file URI (file://...)"
                 # In-context voice cloning (default) requires non-empty ref_text.
-                # x_vector_only_mode skips in-context and only uses speaker embedding.
-                if not request.x_vector_only_mode:
+                # x_vector_only_mode or speaker_embedding skips in-context learning.
+                if not request.x_vector_only_mode and request.speaker_embedding is None:
                     if not request.ref_text or not request.ref_text.strip():
                         return (
                             "Base task requires non-empty 'ref_text' (transcript of "
@@ -533,11 +650,17 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 # voice is not None
                 voice_lower = request.voice.lower()
                 if voice_lower in self.uploaded_speakers:
-                    # Check if audio file exists for uploaded speaker
                     speaker_info = self.uploaded_speakers[voice_lower]
-                    file_path = Path(speaker_info["file_path"])
-                    if not file_path.exists():
-                        return f"Audio file for uploaded speaker '{request.voice}' not found on disk"
+                    if speaker_info.get("embedding_source") == "direct":
+                        # Embedding-based voice: check cache file exists
+                        cache_file = speaker_info.get("cache_file")
+                        if not cache_file or not Path(cache_file).exists():
+                            return f"Cache file for uploaded speaker '{request.voice}' not found on disk"
+                    else:
+                        # Audio-based voice: check audio file exists
+                        file_path = Path(speaker_info["file_path"])
+                        if not file_path.exists():
+                            return f"Audio file for uploaded speaker '{request.voice}' not found on disk"
                 else:
                     # need ref_audio for built-in speaker
                     if request.ref_audio is None:
@@ -738,13 +861,30 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
             # If voice is an uploaded speaker and no ref_audio provided, auto-set it
             if request.voice.lower() in self.uploaded_speakers and request.ref_audio is None:
-                audio_data = self._get_uploaded_audio_data(request.voice)
-                if audio_data:
-                    params["ref_audio"] = [audio_data]
-                    params["x_vector_only_mode"] = [True]
-                    logger.info(f"Auto-set ref_audio for uploaded voice: {request.voice}")
+                speaker_info = self.uploaded_speakers[request.voice.lower()]
+                if speaker_info.get("embedding_source") == "direct":
+                    # Voice was registered with a pre-computed embedding.
+                    # Load from safetensors cache and inject as voice_clone_prompt.
+                    cache_file = speaker_info.get("cache_file")
+                    if cache_file:
+                        from safetensors.torch import load_file
+
+                        tensors = load_file(cache_file)
+                        emb = tensors["speaker_embedding"]
+                        params["voice_clone_prompt"] = [{"ref_spk_embedding": emb.tolist()}]
+                        params["x_vector_only_mode"] = [True]
+                        logger.info(f"Auto-set speaker embedding for uploaded voice: {request.voice}")
+                    else:
+                        raise ValueError(f"Cache file missing for embedding-based voice '{request.voice}'")
                 else:
-                    raise ValueError(f"Audio file for uploaded voice '{request.voice}' is missing or corrupted")
+                    # Voice was registered with an audio file.
+                    audio_data = self._get_uploaded_audio_data(request.voice)
+                    if audio_data:
+                        params["ref_audio"] = [audio_data]
+                        params["x_vector_only_mode"] = [True]
+                        logger.info(f"Auto-set ref_audio for uploaded voice: {request.voice}")
+                    else:
+                        raise ValueError(f"Audio file for uploaded voice '{request.voice}' is missing or corrupted")
 
         elif params["task_type"][0] == "CustomVoice":
             params["speaker"] = ["Vivian"]  # Default for CustomVoice
