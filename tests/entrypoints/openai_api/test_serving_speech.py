@@ -600,6 +600,86 @@ class TestTTSMethods:
         result = speech_server._validate_tts_request(req)
         assert "does not support CustomVoice" in result
 
+    # ── speaker_embedding validation ──
+
+    def test_speaker_embedding_valid_base_task(self, speech_server):
+        """speaker_embedding with Base task, x_vector_only_mode, and no ref_audio is accepted."""
+        emb = [0.1] * 1024
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb, x_vector_only_mode=True)
+        assert speech_server._validate_tts_request(req) is None
+
+    def test_speaker_embedding_requires_x_vector_only_mode(self, speech_server):
+        """speaker_embedding without x_vector_only_mode fails ref_text validation."""
+        emb = [0.1] * 1024
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb)
+        result = speech_server._validate_tts_request(req)
+        assert "x_vector_only_mode" in result
+
+    def test_speaker_embedding_wrong_task_type(self, speech_server):
+        """speaker_embedding is only valid for Base task."""
+        emb = [0.1] * 1024
+        req = OpenAICreateSpeechRequest(
+            input="Hello", task_type="VoiceDesign", speaker_embedding=emb, instructions="warm"
+        )
+        result = speech_server._validate_tts_request(req)
+        assert "only valid for Base task" in result
+
+    def test_speaker_embedding_mutually_exclusive_with_ref_audio(self, speech_server):
+        """speaker_embedding and ref_audio cannot both be provided."""
+        emb = [0.1] * 1024
+        req = OpenAICreateSpeechRequest(
+            input="Hello", task_type="Base", speaker_embedding=emb, ref_audio="data:audio/wav;base64,abc"
+        )
+        result = speech_server._validate_tts_request(req)
+        assert "mutually exclusive" in result
+
+    def test_speaker_embedding_empty_list_rejected(self, speech_server):
+        """Empty speaker_embedding list is rejected."""
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=[])
+        result = speech_server._validate_tts_request(req)
+        assert "non-empty" in result
+
+    def test_speaker_embedding_wrong_dims_accepted(self, speech_server):
+        """Non-standard dimensions pass validation (warning only, not an error)."""
+        emb = [0.1] * 512  # not 1024 or 2048
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb, x_vector_only_mode=True)
+        result = speech_server._validate_tts_request(req)
+        assert result is None
+
+    def test_speaker_embedding_2048_dims_accepted(self, speech_server):
+        """2048-dim embedding (1.7B model) is accepted without warning."""
+        emb = [0.1] * 2048
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb, x_vector_only_mode=True)
+        assert speech_server._validate_tts_request(req) is None
+
+    def test_base_task_requires_ref_audio_or_speaker_embedding(self, speech_server):
+        """Base task without ref_audio or speaker_embedding is rejected."""
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base")
+        result = speech_server._validate_tts_request(req)
+        assert "ref_audio" in result and "speaker_embedding" in result
+
+    # ── speaker_embedding in _build_tts_params ──
+
+    def test_build_tts_params_with_speaker_embedding(self, speech_server):
+        """speaker_embedding produces voice_clone_prompt and x_vector_only_mode."""
+        emb = [0.1] * 1024
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb)
+        params = speech_server._build_tts_params(req)
+
+        assert "voice_clone_prompt" in params
+        vcp = params["voice_clone_prompt"][0]
+        assert "ref_spk_embedding" in vcp
+        # Stored as plain list (not tensor) so it survives msgspec IPC serialization
+        assert isinstance(vcp["ref_spk_embedding"], list)
+        assert len(vcp["ref_spk_embedding"]) == 1024
+        assert params["x_vector_only_mode"] == [True]
+
+    def test_build_tts_params_without_speaker_embedding(self, speech_server):
+        """Without speaker_embedding, voice_clone_prompt is not set."""
+        req = OpenAICreateSpeechRequest(input="Hello", voice="Ryan", language="English")
+        params = speech_server._build_tts_params(req)
+        assert "voice_clone_prompt" not in params
+
     def test_build_tts_params(self, speech_server):
         """Test TTS parameter building."""
         req = OpenAICreateSpeechRequest(input="Hello", voice="Ryan", language="English")
