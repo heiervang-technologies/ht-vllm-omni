@@ -41,7 +41,7 @@ class OpenAICreateSpeechRequest(BaseModel):
     )
     ref_audio: str | None = Field(
         default=None,
-        description="Reference audio for voice cloning (Base task). URL, base64, or file path.",
+        description="Reference audio for voice cloning (Base task). HTTP/HTTPS URL or base64 data URL.",
     )
     ref_text: str | None = Field(
         default=None,
@@ -50,6 +50,12 @@ class OpenAICreateSpeechRequest(BaseModel):
     x_vector_only_mode: bool | None = Field(
         default=None,
         description="Use speaker embedding only without in-context learning (Base task)",
+    )
+    speaker_embedding: list[float] | None = Field(
+        default=None,
+        description="Pre-computed speaker embedding vector (1024-dim). "
+        "When provided, skips speaker encoder extraction from ref_audio. "
+        "Implies x_vector_only_mode=True. Mutually exclusive with ref_audio.",
     )
     max_new_tokens: int | None = Field(
         default=None,

@@ -603,14 +603,34 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             if request.voice is not None and request.voice not in self.supported_speakers:
                 return f"Invalid voice '{request.voice}'. Supported: {', '.join(sorted(self.supported_speakers))}"
 
+        # Validate speaker_embedding constraints
+        if request.speaker_embedding is not None:
+            if task_type != "Base":
+                return "'speaker_embedding' is only valid for Base task"
+            if request.ref_audio is not None:
+                return "'speaker_embedding' and 'ref_audio' are mutually exclusive"
+            if not request.speaker_embedding:
+                return "'speaker_embedding' must be a non-empty list of floats"
+            emb_len = len(request.speaker_embedding)
+            # ECAPA-TDNN produces 1024-dim (0.6B) or 2048-dim (1.7B)
+            expected_dims = {1024, 2048}
+            if emb_len not in expected_dims:
+                logger.warning(
+                    "speaker_embedding has %d dimensions; expected 1024 "
+                    "(0.6B model) or 2048 (1.7B model). Wrong dimensions "
+                    "will likely result in errors or degraded quality.",
+                    emb_len,
+                )
+
         # Validate Base task requirements
         if task_type == "Base":
             if request.voice is None:
-                if request.ref_audio is None:
-                    return "Base task requires 'ref_audio' for voice cloning"
-                fmt_err = self._validate_ref_audio_format(request.ref_audio)
-                if fmt_err:
-                    return fmt_err
+                if request.ref_audio is None and request.speaker_embedding is None:
+                    return "Base task requires 'ref_audio' or 'speaker_embedding' for voice cloning"
+                if request.ref_audio is not None:
+                    fmt_err = self._validate_ref_audio_format(request.ref_audio)
+                    if fmt_err:
+                        return fmt_err
                 # In-context voice cloning (default) requires non-empty ref_text.
                 # x_vector_only_mode skips in-context and only uses speaker embedding.
                 if not request.x_vector_only_mode:
@@ -824,7 +844,18 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         # Voice clone: ref_audio resolved in create_speech(), not here.
         if request.ref_text is not None:
             params["ref_text"] = [request.ref_text]
-        if request.x_vector_only_mode is not None:
+        if request.speaker_embedding is not None:
+            # Store as plain float list (not tensor) so it survives msgspec
+            # serialization through the EngineCore IPC boundary.  The talker's
+            # _build_prompt_embeds converts it back to a tensor on the GPU.
+            params["voice_clone_prompt"] = [
+                {
+                    "ref_spk_embedding": list(request.speaker_embedding),
+                }
+            ]
+            # speaker_embedding implies x_vector_only_mode
+            params["x_vector_only_mode"] = [True]
+        elif request.x_vector_only_mode is not None:
             params["x_vector_only_mode"] = [request.x_vector_only_mode]
 
         # Generation parameters
