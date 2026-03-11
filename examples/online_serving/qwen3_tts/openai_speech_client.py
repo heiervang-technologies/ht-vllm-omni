@@ -25,12 +25,11 @@ Examples:
     # Base task with pre-computed speaker embedding
     python openai_speech_client.py --text "Hello world" \
         --task-type Base \
-        --speaker-embedding embedding.json
+        --speaker-embedding embedding.safetensors
 """
 
 import argparse
 import base64
-import json
 import os
 
 import httpx
@@ -98,8 +97,10 @@ def run_tts_generation(args) -> None:
     if args.x_vector_only:
         payload["x_vector_only_mode"] = True
     if args.speaker_embedding:
-        with open(args.speaker_embedding) as f:
-            payload["speaker_embedding"] = json.load(f)
+        from safetensors.numpy import load_file as load_safetensors_np
+
+        tensors = load_safetensors_np(args.speaker_embedding)
+        payload["speaker_embedding"] = tensors["speaker_embedding"].tolist()
 
     print(f"Model: {args.model}")
     print(f"Task type: {args.task_type or 'CustomVoice'}")
@@ -227,7 +228,7 @@ def parse_args():
         "--speaker-embedding",
         type=str,
         default=None,
-        help="Path to JSON file containing a pre-computed 1024-dim speaker embedding vector",
+        help="Path to safetensors file containing a pre-computed speaker embedding vector",
     )
 
     # Generation parameters

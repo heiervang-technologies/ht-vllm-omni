@@ -1017,15 +1017,18 @@ async def list_voices(raw_request: Request):
     uploaded_speakers = []
     if hasattr(handler, "uploaded_speakers"):
         for voice_name, info in handler.uploaded_speakers.items():
-            uploaded_speakers.append(
-                {
-                    "name": info.get("name", voice_name),
-                    "consent": info.get("consent", ""),
-                    "created_at": info.get("created_at", 0),
-                    "file_size": info.get("file_size", 0),
-                    "mime_type": info.get("mime_type", ""),
-                }
-            )
+            voice_entry = {
+                "name": info.get("name", voice_name),
+                "consent": info.get("consent", ""),
+                "created_at": info.get("created_at", 0),
+                "embedding_source": info.get("embedding_source", "audio"),
+            }
+            if info.get("embedding_source") == "direct":
+                voice_entry["embedding_dim"] = info.get("embedding_dim", 0)
+            else:
+                voice_entry["file_size"] = info.get("file_size", 0)
+                voice_entry["mime_type"] = info.get("mime_type", "")
+            uploaded_speakers.append(voice_entry)
 
     return JSONResponse(content={"voices": speakers, "uploaded_voices": uploaded_speakers})
 
@@ -1040,20 +1043,23 @@ async def list_voices(raw_request: Request):
 )
 async def upload_voice(
     raw_request: Request,
-    audio_sample: UploadFile = File(...),
+    audio_sample: UploadFile | None = File(None),
     consent: str = Form(...),
     name: str = Form(...),
+    speaker_embedding: str | None = Form(None),
 ):
-    """Upload a new voice sample for voice cloning.
+    """Upload a new voice sample or register a pre-computed speaker embedding.
 
-    Uploads an audio file that can be used as a reference for voice cloning
-    in Base task TTS requests. The voice can then be referenced by name
-    in subsequent TTS requests.
+    Accepts either an audio file or a speaker embedding (mutually exclusive).
+    When speaker_embedding is provided (as a JSON list of floats), the voice
+    is registered directly without requiring audio extraction.
 
     Args:
-        audio_sample: Audio file (max 10MB)
+        audio_sample: Audio file (max 10MB). Mutually exclusive with speaker_embedding.
         consent: Consent recording ID
         name: Name for the new voice
+        speaker_embedding: JSON-encoded list of floats (e.g. "[0.1, 0.2, ...]").
+            Mutually exclusive with audio_sample.
         raw_request: Raw FastAPI request
 
     Returns:
@@ -1064,8 +1070,27 @@ async def upload_voice(
         return base(raw_request).create_error_response(message="The model does not support Speech API")
 
     try:
+        # Parse speaker_embedding from JSON string if provided
+        parsed_embedding = None
+        if speaker_embedding is not None:
+            try:
+                parsed_embedding = json.loads(speaker_embedding)
+            except json.JSONDecodeError:
+                return base(raw_request).create_error_response(
+                    message="'speaker_embedding' must be a valid JSON list of floats"
+                )
+            if not isinstance(parsed_embedding, list) or not all(isinstance(x, (int, float)) for x in parsed_embedding):
+                return base(raw_request).create_error_response(
+                    message="'speaker_embedding' must be a JSON list of numbers"
+                )
+
         # Upload the voice
-        result = await handler.upload_voice(audio_sample, consent, name)
+        result = await handler.upload_voice(
+            audio_file=audio_sample,
+            consent=consent,
+            name=name,
+            speaker_embedding=parsed_embedding,
+        )
 
         return JSONResponse(content={"success": True, "voice": result})
 
