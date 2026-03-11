@@ -1,4 +1,4 @@
-# Copyright 2026 The Alibaba Qwen team.
+# Copyright 2026 Heiervang Technologies.
 # SPDX-License-Identifier: Apache-2.0
 """
 CUDA Graph wrapper for Qwen3TTSTokenizerV2Decoder.
@@ -110,6 +110,7 @@ class CUDAGraphDecoderWrapper:
                 _ = self.decoder(dummy)
 
         torch.cuda.synchronize(device)
+
 
         for size in self.capture_sizes:
             try:
