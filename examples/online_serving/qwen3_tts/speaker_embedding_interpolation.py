@@ -5,19 +5,19 @@ speaker encoder from a Qwen3-TTS checkpoint, then interpolates between them
 using SLERP and sends the result to the /v1/audio/speech API.
 
 Requirements:
-    pip install torch librosa soundfile numpy httpx
+    pip install torch librosa soundfile numpy httpx safetensors
 
 Examples:
     # Extract and save an embedding
     python speaker_embedding_interpolation.py extract \
         --model Qwen/Qwen3-TTS-12Hz-1.7B-Base \
         --audio voice_a.wav \
-        --output voice_a_embedding.json
+        --output voice_a_embedding.safetensors
 
     # Interpolate between two embeddings and generate speech
     python speaker_embedding_interpolation.py interpolate \
-        --embedding-a voice_a_embedding.json \
-        --embedding-b voice_b_embedding.json \
+        --embedding-a voice_a_embedding.safetensors \
+        --embedding-b voice_b_embedding.safetensors \
         --ratio 0.5 \
         --text "Hello, this is a blended voice." \
         --output blended.wav
@@ -33,15 +33,16 @@ Examples:
 """
 
 import argparse
-import json
 import os
 import sys
 
 import httpx
 import numpy as np
 import torch
+from safetensors.numpy import load_file as load_safetensors_np
+from safetensors.numpy import save_file as save_safetensors_np
 
-DEFAULT_API_BASE = "http://localhost:8000"
+DEFAULT_API_BASE = "http://localhost:8091"
 DEFAULT_API_KEY = "EMPTY"
 
 # ──────────────────────────────────────────────
@@ -252,7 +253,7 @@ def generate_speech(
 
 
 def cmd_extract(args):
-    """Extract a speaker embedding from audio and save as JSON."""
+    """Extract a speaker embedding from audio and save as safetensors."""
     print(f"Loading speaker encoder from {args.model}...")
     encoder = load_speaker_encoder(args.model, device=args.device)
 
@@ -260,18 +261,15 @@ def cmd_extract(args):
     emb = extract_embedding(encoder, args.audio, device=args.device)
     print(f"Embedding shape: {emb.shape}")
 
-    output_path = args.output or os.path.splitext(args.audio)[0] + "_embedding.json"
-    with open(output_path, "w") as f:
-        json.dump(emb.tolist(), f)
+    output_path = args.output or os.path.splitext(args.audio)[0] + "_embedding.safetensors"
+    save_safetensors_np({"speaker_embedding": emb}, output_path)
     print(f"Saved embedding to {output_path}")
 
 
 def cmd_interpolate(args):
     """Interpolate between two embeddings and generate speech."""
-    with open(args.embedding_a) as f:
-        emb_a = np.array(json.load(f), dtype=np.float32)
-    with open(args.embedding_b) as f:
-        emb_b = np.array(json.load(f), dtype=np.float32)
+    emb_a = load_safetensors_np(args.embedding_a)["speaker_embedding"]
+    emb_b = load_safetensors_np(args.embedding_b)["speaker_embedding"]
 
     print(f"Embedding A: {args.embedding_a} (dim={emb_a.shape[0]})")
     print(f"Embedding B: {args.embedding_b} (dim={emb_b.shape[0]})")
@@ -304,9 +302,8 @@ def cmd_pipeline(args):
     # Save extracted embeddings
     os.makedirs(args.output_dir, exist_ok=True)
     for label, emb, audio_path in [("a", emb_a, args.audio_a), ("b", emb_b, args.audio_b)]:
-        emb_path = os.path.join(args.output_dir, f"embedding_{label}.json")
-        with open(emb_path, "w") as f:
-            json.dump(emb.tolist(), f)
+        emb_path = os.path.join(args.output_dir, f"embedding_{label}.safetensors")
+        save_safetensors_np({"speaker_embedding": emb}, emb_path)
         print(f"Saved embedding {label} to {emb_path}")
 
     # Generate at each ratio
@@ -346,12 +343,12 @@ def main():
     # extract
     p_ext = sub.add_parser("extract", help="Extract speaker embedding from audio")
     p_ext.add_argument("--audio", required=True, help="Input audio file")
-    p_ext.add_argument("--output", "-o", help="Output JSON path (default: <audio>_embedding.json)")
+    p_ext.add_argument("--output", "-o", help="Output safetensors path (default: <audio>_embedding.safetensors)")
 
     # interpolate
     p_interp = sub.add_parser("interpolate", help="Interpolate between two embeddings and generate speech")
-    p_interp.add_argument("--embedding-a", required=True, help="JSON file with embedding A")
-    p_interp.add_argument("--embedding-b", required=True, help="JSON file with embedding B")
+    p_interp.add_argument("--embedding-a", required=True, help="Safetensors file with embedding A")
+    p_interp.add_argument("--embedding-b", required=True, help="Safetensors file with embedding B")
     p_interp.add_argument("--ratio", "-r", type=float, default=0.5, help="SLERP ratio (0=A, 1=B)")
     p_interp.add_argument("--text", required=True, help="Text to synthesize")
     p_interp.add_argument("--output", "-o", help="Output wav path")

@@ -1,7 +1,11 @@
+import math
 from typing import Literal
 
 import numpy as np
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+# Maximum embedding dimensions (ECAPA-TDNN: 1024 for 0.6B, 2048 for 1.7B)
+_MAX_EMBEDDING_DIM = 8192
 
 
 class OpenAICreateSpeechRequest(BaseModel):
@@ -25,7 +29,7 @@ class OpenAICreateSpeechRequest(BaseModel):
     stream: bool = Field(
         default=False,
         description=(
-            "If true, stream raw PCM audio chunks as they are decoded. "
+            "If true, stream audio chunks progressively as they are generated. "
             "Requires response_format='pcm'. Speed adjustment is not supported when streaming."
         ),
     )
@@ -53,13 +57,10 @@ class OpenAICreateSpeechRequest(BaseModel):
     )
     speaker_embedding: list[float] | None = Field(
         default=None,
-        description="Pre-computed speaker embedding vector (1024-dim). "
+        max_length=_MAX_EMBEDDING_DIM,
+        description="Pre-computed speaker embedding vector (1024 or 2048-dim). "
         "When provided, skips speaker encoder extraction from ref_audio. "
         "Implies x_vector_only_mode=True. Mutually exclusive with ref_audio.",
-    )
-    stream: bool = Field(
-        default=False,
-        description="Stream audio chunks progressively as they are generated.",
     )
     max_new_tokens: int | None = Field(
         default=None,
@@ -79,7 +80,8 @@ class OpenAICreateSpeechRequest(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def validate_streaming_constraints(self) -> "OpenAICreateSpeechRequest":
+    def validate_request_constraints(self) -> "OpenAICreateSpeechRequest":
+        # Streaming constraints
         if self.stream:
             if self.response_format not in ("pcm", "wav"):
                 raise ValueError(
@@ -92,6 +94,14 @@ class OpenAICreateSpeechRequest(BaseModel):
                 raise ValueError(
                     "Speed adjustment is not supported when streaming (stream=true). Set speed=1.0 or omit it."
                 )
+
+        # Speaker embedding constraints
+        if self.speaker_embedding is not None:
+            if self.ref_audio is not None:
+                raise ValueError("'speaker_embedding' and 'ref_audio' are mutually exclusive")
+            if not all(math.isfinite(x) for x in self.speaker_embedding):
+                raise ValueError("'speaker_embedding' values must be finite (no NaN or Inf)")
+
         return self
 
 
