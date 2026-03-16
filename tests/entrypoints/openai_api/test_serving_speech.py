@@ -777,6 +777,46 @@ class TestTTSMethods:
         req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=emb, x_vector_only_mode=True)
         assert speech_server._validate_tts_request(req) is None
 
+    def test_speaker_embedding_end_requires_start(self, speech_server):
+        """speaker_embedding_end without speaker_embedding is rejected."""
+        with pytest.raises(ValidationError, match="requires 'speaker_embedding'"):
+            OpenAICreateSpeechRequest(
+                input="Hello",
+                task_type="Base",
+                speaker_embedding_end=[0.1] * 1024,
+            )
+
+    def test_speaker_embedding_end_dimension_mismatch(self, speech_server):
+        """speaker_embedding and speaker_embedding_end must have same dimension."""
+        with pytest.raises(ValidationError, match="same dimension"):
+            OpenAICreateSpeechRequest(
+                input="Hello",
+                task_type="Base",
+                speaker_embedding=[0.1] * 1024,
+                speaker_embedding_end=[0.1] * 2048,
+            )
+
+    def test_speaker_embedding_end_nan_rejected(self, speech_server):
+        """NaN in speaker_embedding_end is rejected."""
+        with pytest.raises(ValidationError, match="finite"):
+            OpenAICreateSpeechRequest(
+                input="Hello",
+                task_type="Base",
+                speaker_embedding=[0.1] * 1024,
+                speaker_embedding_end=[float("nan")] + [0.1] * 1023,
+            )
+
+    def test_speaker_embedding_steering_valid(self, speech_server):
+        """Valid steering request (start + end) passes validation."""
+        req = OpenAICreateSpeechRequest(
+            input="Hello",
+            task_type="Base",
+            speaker_embedding=[0.1] * 1024,
+            speaker_embedding_end=[0.9] * 1024,
+        )
+        result = speech_server._validate_tts_request(req)
+        assert result is None
+
     def test_base_task_requires_ref_audio_or_speaker_embedding(self, speech_server):
         """Base task without ref_audio or speaker_embedding is rejected."""
         req = OpenAICreateSpeechRequest(input="Hello", task_type="Base")
@@ -797,6 +837,23 @@ class TestTTSMethods:
         # Stored as plain list (not tensor) so it survives msgspec IPC serialization
         assert isinstance(vcp["ref_spk_embedding"], list)
         assert len(vcp["ref_spk_embedding"]) == 1024
+        assert params["x_vector_only_mode"] == [True]
+
+    def test_build_tts_params_with_steering(self, speech_server):
+        """speaker_embedding + speaker_embedding_end produces both in voice_clone_prompt."""
+        emb_start = [0.1] * 1024
+        emb_end = [0.9] * 1024
+        req = OpenAICreateSpeechRequest(
+            input="Hello",
+            task_type="Base",
+            speaker_embedding=emb_start,
+            speaker_embedding_end=emb_end,
+        )
+        params = speech_server._build_tts_params(req)
+        vcp = params["voice_clone_prompt"][0]
+        assert "ref_spk_embedding" in vcp
+        assert "ref_spk_embedding_end" in vcp
+        assert len(vcp["ref_spk_embedding_end"]) == 1024
         assert params["x_vector_only_mode"] == [True]
 
     def test_build_tts_params_without_speaker_embedding(self, speech_server):

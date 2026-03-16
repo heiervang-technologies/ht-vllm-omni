@@ -959,11 +959,12 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             # Store as plain float list (not tensor) so it survives msgspec
             # serialization through the EngineCore IPC boundary.  The talker's
             # _build_prompt_embeds converts it back to a tensor on the GPU.
-            params["voice_clone_prompt"] = [
-                {
-                    "ref_spk_embedding": list(request.speaker_embedding),
-                }
-            ]
+            vcp: dict[str, object] = {
+                "ref_spk_embedding": list(request.speaker_embedding),
+            }
+            if request.speaker_embedding_end is not None:
+                vcp["ref_spk_embedding_end"] = list(request.speaker_embedding_end)
+            params["voice_clone_prompt"] = [vcp]
             # speaker_embedding implies x_vector_only_mode
             params["x_vector_only_mode"] = [True]
         elif request.x_vector_only_mode is not None:

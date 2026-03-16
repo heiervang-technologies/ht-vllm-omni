@@ -560,6 +560,11 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                     info_update["ref_code"] = ref_code.detach().to("cpu").contiguous()
                 if ref_code_len is not None:
                     info_update["ref_code_len"] = int(ref_code_len)
+                # Propagate steering state from _build_prompt_embeds.
+                steering_delta = info_dict.get("_steering_delta")
+                if isinstance(steering_delta, torch.Tensor):
+                    info_update["_steering_delta"] = steering_delta
+                    info_update["_steering_step"] = 0
                 # Always return a span_len slice; if the scheduled placeholder is longer, pad with tts_pad_embed.
                 # This preserves placeholder/embedding alignment.
                 offset = 0
@@ -628,10 +633,27 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         )
         inputs_embeds_out = last_id_hidden.reshape(1, -1)
 
+        # Dynamic speaker embedding steering: add scaled delta to the decode
+        # step's input embeddings.  The delta represents (end_embed - start_embed)
+        # in the model's hidden space.  By adding t*delta each step, the model's
+        # attention sees a gradually shifting "virtual speaker" influence.
+        steering_delta_cpu = info_dict.get("_steering_delta")
+        steering_step = int(info_dict.get("_steering_step", 0) or 0)
+        steering_info: dict[str, Any] = {}
+        if isinstance(steering_delta_cpu, torch.Tensor):
+            # Estimate total steps from max_new_tokens (default 2048).
+            max_tokens = int((info_dict.get("max_new_tokens") or [2048])[0])
+            t = min(steering_step / max(max_tokens, 1), 1.0)
+            delta = steering_delta_cpu.to(device=input_ids.device, dtype=torch.bfloat16)
+            inputs_embeds_out = inputs_embeds_out + t * delta.reshape(1, -1)
+            steering_info["_steering_delta"] = steering_delta_cpu
+            steering_info["_steering_step"] = steering_step + 1
+
         info_update = {
             "tailing_text_hidden": new_tail,
             "mtp_inputs": (past_hidden, text_step),
             "codec_streaming": codec_streaming,
+            **steering_info,
         }
         return input_ids, inputs_embeds_out, info_update
 
@@ -1373,6 +1395,33 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                     raise ValueError("Base requires `ref_audio`.")
                 wav_np, sr = self._normalize_ref_audio(ref_audio_list[0])
                 speaker_embed = self._extract_speaker_embedding(wav_np, sr).view(1, 1, -1)
+
+            # Dynamic steering: if an end embedding is provided, compute the
+            # projected delta between start and end speaker embeddings.
+            # This delta is added to decode-step inputs_embeds, scaled by the
+            # interpolation ratio (0→1 over generation).
+            spk_end = None
+            if voice_clone_prompt is not None:
+                spk_end = voice_clone_prompt.get("ref_spk_embedding_end")
+            if spk_end is not None:
+                if isinstance(spk_end, torch.Tensor):
+                    speaker_embed_end = spk_end.to(device=input_ids.device, dtype=torch.bfloat16).view(1, 1, -1)
+                elif isinstance(spk_end, (list, np.ndarray)):
+                    speaker_embed_end = torch.tensor(
+                        spk_end, dtype=torch.bfloat16, device=input_ids.device
+                    ).view(1, 1, -1)
+                else:
+                    speaker_embed_end = None
+
+                if speaker_embed_end is not None:
+                    # The speaker embedding enters the prompt as:
+                    #   codec_prefix[spk_pos] = tts_pad_embed + speaker_embed
+                    # The delta in prompt space is simply (end - start) since
+                    # tts_pad_embed cancels out.
+                    steering_delta = (speaker_embed_end - speaker_embed).squeeze(0).squeeze(0)
+                    # Store for decode-step steering in preprocess().
+                    info_dict["_steering_delta"] = steering_delta.detach().cpu().contiguous()
+                    info_dict["_steering_step"] = 0
 
             codec_input = torch.cat([codec_input_0, speaker_embed, codec_input_1], dim=1)
 

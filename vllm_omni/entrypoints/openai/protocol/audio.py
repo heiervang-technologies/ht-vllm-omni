@@ -62,6 +62,14 @@ class OpenAICreateSpeechRequest(BaseModel):
         "When provided, skips speaker encoder extraction from ref_audio. "
         "Implies x_vector_only_mode=True. Mutually exclusive with ref_audio.",
     )
+    speaker_embedding_end: list[float] | None = Field(
+        default=None,
+        max_length=_MAX_EMBEDDING_DIM,
+        description="Target speaker embedding for dynamic steering. "
+        "When set alongside speaker_embedding, the voice gradually transitions "
+        "from speaker_embedding to speaker_embedding_end during generation "
+        "using spherical interpolation (SLERP).",
+    )
     max_new_tokens: int | None = Field(
         default=None,
         description="Maximum tokens to generate",
@@ -101,6 +109,18 @@ class OpenAICreateSpeechRequest(BaseModel):
                 raise ValueError("'speaker_embedding' and 'ref_audio' are mutually exclusive")
             if not all(math.isfinite(x) for x in self.speaker_embedding):
                 raise ValueError("'speaker_embedding' values must be finite (no NaN or Inf)")
+
+        # Steering constraints
+        if self.speaker_embedding_end is not None:
+            if self.speaker_embedding is None:
+                raise ValueError("'speaker_embedding_end' requires 'speaker_embedding' to also be set")
+            if not all(math.isfinite(x) for x in self.speaker_embedding_end):
+                raise ValueError("'speaker_embedding_end' values must be finite (no NaN or Inf)")
+            if len(self.speaker_embedding_end) != len(self.speaker_embedding):
+                raise ValueError(
+                    f"'speaker_embedding' and 'speaker_embedding_end' must have the same dimension "
+                    f"(got {len(self.speaker_embedding)} and {len(self.speaker_embedding_end)})"
+                )
 
         return self
 
