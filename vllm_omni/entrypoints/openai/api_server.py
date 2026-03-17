@@ -68,6 +68,7 @@ from vllm.entrypoints.openai.speech_to_text.serving import (
 )
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.pooling.classify.serving import ServingClassification
+
 try:
     from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
 except ImportError:
