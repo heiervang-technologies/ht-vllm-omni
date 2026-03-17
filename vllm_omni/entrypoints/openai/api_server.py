@@ -60,7 +60,11 @@ from vllm.entrypoints.openai.speech_to_text.serving import (
 )
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.pooling.classify.serving import ServingClassification
-from vllm.entrypoints.pooling.embed.serving import ServingEmbedding as OpenAIServingEmbedding
+
+try:
+    from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
+except ImportError:
+    from vllm.entrypoints.pooling.embed.serving import ServingEmbedding as OpenAIServingEmbedding
 from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
 from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.entrypoints.serve.disagg.serving import ServingTokens
