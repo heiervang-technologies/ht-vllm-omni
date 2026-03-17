@@ -15,13 +15,14 @@ import huggingface_hub
 import msgspec.msgpack
 import torch
 import zmq
-from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 from vllm import SamplingParams
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.utils import get_engine_client_zmq_addr
 
+from vllm_omni.config.stage_config import StageConfigFactory
+from vllm_omni.config.yaml_util import create_config
 from vllm_omni.distributed.omni_connectors import (
     get_stage_connector_config,
     initialize_orchestrator_connectors,
@@ -224,46 +225,35 @@ class OmniBase:
             cache_config = self._get_default_cache_config(cache_backend)
         return cache_config
 
-    def _create_default_diffusion_stage_cfg(self, kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Create default diffusion stage configuration."""
-        # We temporally create a default config for diffusion stage.
-        # In the future, we should merge the default config with the user-provided config.
-        # TODO: hack, convert dtype to string to avoid non-premitive omegaconf create error.
+    def _create_default_diffusion_stage_cfg(self, kwargs: dict[str, Any]) -> list[dict[str, Any]]:
+        """Create default diffusion stage configuration.
+
+        Uses StageConfigFactory for typed configuration creation while
+        maintaining backward compatibility with the legacy format.
+
+        Args:
+            kwargs: Engine arguments from CLI/API.
+
+        Returns:
+            List containing a single OmegaConf config for the diffusion stage.
+        """
+        # Normalize dtype
         if "dtype" in kwargs and not isinstance(kwargs["dtype"], str):
             if not isinstance(kwargs["dtype"], torch.dtype):
                 raise TypeError(f"Provided dtype must be a string or torch.dtype, got {type(kwargs['dtype']).__name__}")
             kwargs["dtype"] = str(kwargs["dtype"]).removeprefix("torch.")
 
+        # Normalize cache config before passing to factory
         cache_backend = kwargs.get("cache_backend", "none")
         cache_config = self._normalize_cache_config(cache_backend, kwargs.get("cache_config", None))
-        # TODO: hack, calculate devices based on parallel config.
-        devices = "0"
-        if "parallel_config" in kwargs:
-            num_devices = kwargs["parallel_config"].world_size
-            for i in range(1, num_devices):
-                devices += f",{i}"
-        default_stage_cfg = [
-            {
-                "stage_id": 0,
-                "stage_type": "diffusion",
-                "runtime": {
-                    "process": True,
-                    "devices": devices,
-                    "max_batch_size": 1,
-                },
-                "engine_args": OmegaConf.create(
-                    {
-                        **kwargs,
-                        "cache_backend": cache_backend,
-                        "cache_config": cache_config,
-                    }
-                ),
-                "final_output": True,
-                "final_output_type": "image",
-            }
-        ]
-        default_stage_cfg[0]["engine_args"]["model_stage"] = "diffusion"
-        return default_stage_cfg
+
+        # Update kwargs with normalized values
+        kwargs_copy = dict(kwargs)
+        kwargs_copy["cache_backend"] = cache_backend
+        kwargs_copy["cache_config"] = cache_config
+
+        # Use the factory to create default diffusion config
+        return StageConfigFactory.create_default_diffusion(kwargs_copy)
 
     def _resolve_stage_configs(self, model: str, kwargs: dict[str, Any]) -> tuple[str, list[Any]]:
         """Resolve stage configs and inject defaults shared by orchestrator/headless."""
@@ -290,7 +280,7 @@ class OmniBase:
                 if getattr(cfg, "stage_type", None) != "diffusion":
                     continue
                 if not hasattr(cfg, "engine_args") or cfg.engine_args is None:
-                    cfg.engine_args = OmegaConf.create({})
+                    cfg.engine_args = create_config({})
                 if kwargs.get("lora_path") is not None:
                     if not hasattr(cfg.engine_args, "lora_path") or cfg.engine_args.lora_path is None:
                         cfg.engine_args.lora_path = kwargs["lora_path"]
@@ -313,63 +303,6 @@ class OmniBase:
 
         return config_path, stage_configs
 
-    def _coordinate_vram_resources(self) -> None:
-        """
-        Coordinate VRAM resource reservations across stages based on their type and configs.
-        Note: Current implementation supports per-device isolation. Advanced multi-GPU
-        scenarios like TP or PP are planned as sleep mode ack Test Scenario.
-        """
-        import torch
-        from vllm.utils.mem_utils import GiB_bytes
-
-        from vllm_omni.diffusion.worker.diffusion_worker import DiffusionWorker
-
-        # Device ID
-        reserved_gb_per_device: dict[int, float] = {}
-        active_configs = self.stage_configs
-        if hasattr(self, "_single_stage_id") and self._single_stage_id is not None:
-            active_configs = [cfg for cfg in self.stage_configs if cfg.stage_id == self._single_stage_id]
-        for cfg in active_configs:
-            s_type = getattr(cfg, "stage_type", None)
-            if s_type == "diffusion":
-                prediction = DiffusionWorker.predict_resource_usage(cfg.engine_args)
-                device_str = getattr(cfg.runtime, "devices", "0")
-                try:
-                    devices = [int(d.strip()) for d in device_str.split(",")]
-                except (ValueError, AttributeError):
-                    devices = [0]
-                for d_id in devices:
-                    reserved_gb_per_device[d_id] = reserved_gb_per_device.get(d_id, 0.0) + prediction["total_gb"]
-                logger.info(
-                    f"[Coordinator] Stage-{cfg.stage_id} ({s_type.capitalize()}) "
-                    f"on devices {devices} predicted budget: {prediction['total_gb']:.2f} GiB"
-                )
-        if not torch.cuda.is_available():
-            # TODO: Add support for other accelerators (NPU/XPU)
-            # as their specific memory management APIs are integrated.
-            return
-        for cfg in active_configs:
-            if getattr(cfg, "stage_type", None) == "llm":
-                # Get the master device ID where the LLM is located
-                llm_device_str = getattr(cfg.runtime, "devices", "0")
-                try:
-                    target_device = int(llm_device_str.split(",")[0].strip())
-                except (ValueError, AttributeError):
-                    target_device = 0
-                # The physical total of the card containing LLM
-                physical_vram_gb = torch.cuda.get_device_properties(target_device).total_memory / GiB_bytes
-                total_reserved_on_this_device = reserved_gb_per_device.get(target_device, 0.0)
-                if total_reserved_on_this_device > 0:
-                    original_util = cfg.engine_args.get("gpu_memory_utilization", 0.9)
-                    reserved_util_ratio = total_reserved_on_this_device / physical_vram_gb
-                    adjusted_util = min(0.95, original_util + reserved_util_ratio)
-                    cfg.engine_args["gpu_memory_utilization"] = round(adjusted_util, 3)
-                    logger.info(
-                        f"[Coordinator] LLM Stage-{cfg.stage_id} on Device {target_device} dynamic boost: "
-                        f"{original_util} -> {cfg.engine_args['gpu_memory_utilization']} "
-                        f"(Compensating {reserved_util_ratio:.2f} ratio for resource domain isolation)"
-                    )
-
     def _initialize_stages(self, model: str, kwargs: dict[str, Any]) -> None:
         """Initialize stage list management."""
         self._inline_diffusion = False
@@ -391,9 +324,6 @@ class OmniBase:
 
         # Resolve stage configs shared by orchestrator/headless paths.
         self.config_path, self.stage_configs = self._resolve_stage_configs(model, kwargs)
-
-        # This ensures all engines receive the corrected gpu_memory_utilization through engine_args.
-        self._coordinate_vram_resources()
 
         # Initialize connectors
         self.omni_transfer_config, self.connectors = initialize_orchestrator_connectors(
