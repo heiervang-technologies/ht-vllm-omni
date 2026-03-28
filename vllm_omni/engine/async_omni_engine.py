@@ -32,7 +32,22 @@ from vllm.logger import init_logger
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
-from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines
+from vllm.v1.engine.utils import launch_core_engines
+
+try:
+    from vllm.v1.engine.utils import get_engine_zmq_addresses
+except ImportError:
+    # vllm >=0.16.0 renamed this to EngineZmqAddresses class.
+    # Build a compatible shim that replicates the function signature.
+    from vllm.v1.engine.utils import EngineZmqAddresses, get_open_zmq_ipc_path
+
+    def get_engine_zmq_addresses(vllm_config) -> EngineZmqAddresses:  # type: ignore[misc]
+        num_engines = max(1, getattr(
+            getattr(vllm_config, "parallel_config", None),
+            "data_parallel_size", 1))
+        inputs = [get_open_zmq_ipc_path() for _ in range(num_engines)]
+        outputs = [get_open_zmq_ipc_path() for _ in range(num_engines)]
+        return EngineZmqAddresses(inputs=inputs, outputs=outputs)
 
 from vllm_omni.diffusion.data import DiffusionParallelConfig
 from vllm_omni.distributed.omni_connectors.utils.initialization import (
