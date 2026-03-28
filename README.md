@@ -35,19 +35,20 @@ Easy, fast, and cheap omni-modality model serving for everyone
 This is the [Heiervang Technologies](https://github.com/heiervang-technologies) fork of vLLM-Omni. The `ht` branch contains the following changes on top of upstream `main`:
 
 ### Qwen3 TTS Streaming
-- HTTP-level streaming for TTS speech API (`/v1/audio/speech`)
+- Progressive WAV/PCM HTTP streaming with robust audio output extraction
+- Scalar tensor metadata handling in output processor (fixes streaming accumulation)
 - `tts-stream` bash tool for low-latency streaming playback
 - Python streaming client with latency benchmarks
 - E2E tests for streaming (PCM output, silence check, chunked transfer, validation)
 
-### Speaker Embedding
-- `speaker_embedding` API parameter for direct voice cloning (bypasses ref_audio)
-- Fix: speaker embedding survives EngineCore IPC serialization ([#22](https://github.com/heiervang-technologies/ht-vllm-omni/issues/22))
-- Speaker embedding extraction and SLERP interpolation example
-- E2E tests for 0.6B-Base, 0.6B-CustomVoice, and 1.7B-Base models
+### Speaker Embedding *(merged upstream — [#1227](https://github.com/vllm-project/vllm-omni/pull/1227))*
+- ~~`speaker_embedding` API parameter for direct voice cloning (bypasses ref_audio)~~
+- ~~Speaker embedding extraction and SLERP interpolation example~~
+- ~~E2E tests for 0.6B-Base, 0.6B-CustomVoice, and 1.7B-Base models~~
 
 ### Qwen3 TTS Performance
-- ~~CUDA graph support for speech tokenizer decoder~~ *(now in upstream — [#1617](https://github.com/vllm-project/vllm-omni/pull/1617))*
+- ~~CUDA graph support for speech tokenizer decoder~~ *(merged upstream — [#1617](https://github.com/vllm-project/vllm-omni/pull/1617))*
+- CUDA graph warmup for talker speech tokenizer decoder (`enable_cudagraph` on load)
 
 ### CI/Infrastructure
 - GHCR Docker build workflow (`Dockerfile.slim`)

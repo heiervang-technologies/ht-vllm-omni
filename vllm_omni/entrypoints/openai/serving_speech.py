@@ -842,14 +842,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if task_type == "VoiceDesign" and not request.instructions:
             return "VoiceDesign task requires 'instructions' to describe the voice"
 
-        # Validate streaming constraints
-        if request.stream:
-            fmt = (request.response_format or "wav").lower()
-            if fmt not in ("wav", "pcm"):
-                return f"Streaming only supports 'wav' and 'pcm' response formats, got '{fmt}'"
-            if request.speed is not None and request.speed != 1.0:
-                return "Streaming does not support speed adjustment (speed must be 1.0)"
-
         # Validate instructions length (using cached value from initialization)
         if request.instructions and len(request.instructions) > self._max_instructions_length:
             return f"Instructions too long (max {self._max_instructions_length} characters)"
