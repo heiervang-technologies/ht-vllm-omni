@@ -62,6 +62,45 @@ _TTS_MAX_INSTRUCTIONS_LENGTH = 500
 _TTS_MAX_NEW_TOKENS_MIN = 1
 _TTS_MAX_NEW_TOKENS_MAX = 4096
 
+# Sentinel trailer for entropy guardrail signaling.
+# 8 zero bytes (4 silent PCM samples at 16-bit, inaudible) + ASCII magic.
+_GUARDRAIL_SENTINEL = b"\x00" * 8 + b"VLLMMETA"
+
+
+_GUARDRAIL_STOP_PREFIX = "entropy_guardrail:"
+
+
+def _extract_stop_reason_guardrail(res) -> str | None:
+    """Extract entropy guardrail JSON from stop_reason on any OmniRequestOutput."""
+    if res is None:
+        return None
+    # Walk request_output.outputs[] to find stop_reason
+    ro = getattr(res, "request_output", None) or res
+    for output in getattr(ro, "outputs", []):
+        sr = getattr(output, "stop_reason", None)
+        if isinstance(sr, str) and sr.startswith(_GUARDRAIL_STOP_PREFIX):
+            return sr[len(_GUARDRAIL_STOP_PREFIX):]
+    # Also check top-level stop_reason
+    sr = getattr(ro, "stop_reason", None)
+    if isinstance(sr, str) and sr.startswith(_GUARDRAIL_STOP_PREFIX):
+        return sr[len(_GUARDRAIL_STOP_PREFIX):]
+    return None
+
+
+def _build_guardrail_trailer_from_stop_reason(res) -> bytes | None:
+    """Build a sentinel trailer from stop_reason if the guardrail triggered.
+
+    Format: [8 zero bytes][VLLMMETA][4-byte LE uint32 length][UTF-8 JSON]
+    Returns None if the guardrail did not trigger.
+    """
+    payload_str = _extract_stop_reason_guardrail(res)
+    if payload_str is None:
+        return None
+    payload = payload_str.encode("utf-8")
+    length = struct.pack("<I", len(payload))
+    return _GUARDRAIL_SENTINEL + length + payload
+
+
 
 class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
     def __init__(self, *args, **kwargs):
@@ -392,8 +431,10 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         """
         prev_count = 0
         sample_rate_val = 24000
+        last_res = None
         try:
             async for res in generator:
+                last_res = res
                 audio_output, audio_key = self._extract_audio_output(res)
                 if audio_key is None:
                     continue
@@ -431,6 +472,15 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                         base64_encode=False,
                     )
                     yield self.create_audio(audio_obj).audio_data
+
+            # After all audio chunks, check for entropy guardrail sentinel.
+            # The guardrail metadata is encoded in stop_reason (set by the
+            # scheduler from the AR model runner's pooler_output) because it
+            # survives IPC serialization, unlike custom keys in pooler_output.
+            trailer = _build_guardrail_trailer_from_stop_reason(last_res)
+            if trailer is not None:
+                logger.info("Appending entropy guardrail trailer for request %s", request_id)
+                yield trailer
         except asyncio.CancelledError:
             logger.info("Streaming request %s cancelled by client", request_id)
             raise
@@ -628,9 +678,13 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             )
 
             if request.stream:
+                headers = {}
+                if request.entropy_guardrail:
+                    headers["X-TTS-Trailer"] = "supported"
                 return StreamingResponse(
                     self._generate_pcm_chunks(generator, request_id),
                     media_type="audio/pcm",
+                    headers=headers or None,
                 )
 
             # Non-streaming: collect final output
@@ -644,6 +698,10 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             audio_output, audio_key = self._extract_audio_output(final_output)
             if audio_key is None:
                 return self.create_error_response("TTS model did not produce audio output.")
+
+            # Check for entropy guardrail trigger via stop_reason.
+            guardrail_json = _extract_stop_reason_guardrail(final_output)
+            guardrail_header = {"X-TTS-Guardrail": guardrail_json} if guardrail_json else {}
 
             audio_tensor = audio_output[audio_key]
             sr_raw = audio_output.get("sr", 24000)
@@ -670,7 +728,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     base64_encode=False,
                 )
                 audio_response: AudioResponse = self.create_audio(audio_obj)
-                return Response(content=audio_response.audio_data, media_type=audio_response.media_type)
+                return Response(
+                    content=audio_response.audio_data,
+                    media_type=audio_response.media_type,
+                    headers=guardrail_header,
+                )
 
             audio_obj = CreateAudio(
                 audio_tensor=audio_tensor,
@@ -681,7 +743,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 base64_encode=False,
             )
             audio_response = self.create_audio(audio_obj)
-            return Response(content=audio_response.audio_data, media_type=audio_response.media_type)
+            return Response(
+                content=audio_response.audio_data,
+                media_type=audio_response.media_type,
+                headers=guardrail_header,
+            )
 
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")

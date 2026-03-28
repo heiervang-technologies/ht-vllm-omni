@@ -6,6 +6,7 @@ and also outputs sampled tokens.
 
 from __future__ import annotations
 
+import json as _json
 from copy import copy
 from typing import Any, NamedTuple
 
@@ -550,6 +551,20 @@ class GPUARModelRunner(OmniGPUModelRunner):
                 if mm_payload:
                     payload.update(mm_payload)
             pooler_output.append(payload)
+
+        # Inject entropy guardrail trigger metadata into pooler_output.
+        # The talker stores trigger info keyed by batch index in
+        # _entropy_guardrail_triggered during compute_logits.  We encode
+        # it as a JSON byte tensor so it survives the output pipeline.
+        guardrail_triggered = getattr(self.model, "_entropy_guardrail_triggered", None)
+        if guardrail_triggered:
+            for batch_idx, trigger_meta in guardrail_triggered.items():
+                if batch_idx < len(pooler_output):
+                    raw = _json.dumps(trigger_meta).encode("utf-8")
+                    pooler_output[batch_idx]["entropy_guardrail_triggered"] = (
+                        torch.frombuffer(bytearray(raw), dtype=torch.uint8)
+                    )
+
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             if self.model_config.enable_return_routed_experts:
                 capturer = RoutedExpertsCapturer.get_instance()

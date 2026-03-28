@@ -274,6 +274,18 @@ class OmniARScheduler(VLLMScheduler):
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
+
+            # Extract entropy guardrail trigger metadata from pooler_output.
+            # Stored temporarily; applied AFTER _update_request_with_output
+            # because check_stop overwrites stop_reason with the EOS token ID.
+            _guardrail_stop_reason = None
+            if isinstance(pooler_output, dict) and "entropy_guardrail_triggered" in pooler_output:
+                gt = pooler_output.pop("entropy_guardrail_triggered")
+                if hasattr(gt, "numpy"):
+                    gt = gt.numpy()
+                if hasattr(gt, "tobytes"):
+                    _guardrail_stop_reason = "entropy_guardrail:" + gt.tobytes().decode("utf-8")
+
             status_before_stop = request.status
             finish_reason = None
             routed_experts = None
@@ -281,6 +293,11 @@ class OmniARScheduler(VLLMScheduler):
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(request, new_token_ids)
+
+            # Apply guardrail stop_reason AFTER check_stop (which overwrites
+            # stop_reason with the EOS/stop token ID).
+            if _guardrail_stop_reason is not None:
+                request.stop_reason = _guardrail_stop_reason
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED

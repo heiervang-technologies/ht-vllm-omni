@@ -342,6 +342,10 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         # Staging queue: preprocess appends per-request entropy configs in batch
         # order; _apply_entropy_guardrail consumes them to initialize new entries.
         self._entropy_config_staging: list[dict[str, Any]] = []
+        # Per-request guardrail trigger metadata, keyed by batch index.
+        # Set by _apply_entropy_guardrail, consumed by the AR model runner
+        # (gpu_ar_model_runner.py) which injects it into pooler_output.
+        self._entropy_guardrail_triggered: dict[int, dict[str, Any]] = {}
 
         self.have_multimodal_outputs = True
         self.has_preprocess = True
@@ -464,6 +468,9 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         Per-request config is stored in ``_entropy_state[key]["cfg"]`` and
         initialized from ``_entropy_config_staging`` (populated by preprocess).
         """
+        # Reset per-step guardrail trigger state.
+        self._entropy_guardrail_triggered.clear()
+
         output_token_ids = getattr(sampling_metadata, "output_token_ids", None)
         if not output_token_ids:
             return logits
@@ -483,6 +490,12 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         for i in range(batch_size):
             key = id(output_token_ids[i])
             state = self._entropy_state.get(key)
+            if state is not None:
+                # Guard against id() reuse: if the token count is less than
+                # what we previously tracked, the address was recycled.
+                if len(output_token_ids[i]) < state["last_step"]:
+                    del self._entropy_state[key]
+                    state = None
             if state is not None:
                 if state["cfg"]["enabled"]:
                     any_enabled = True
@@ -511,8 +524,8 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
 
         # Compute entropy for each batch element.
         with torch.no_grad():
-            probs = F.softmax(logits, dim=-1)
-            log_probs = torch.log(probs + 1e-10)
+            log_probs = F.log_softmax(logits, dim=-1)
+            probs = log_probs.exp()
             entropy = -torch.sum(probs * log_probs, dim=-1)  # shape: (batch,)
 
         for i in range(batch_size):
@@ -559,6 +572,15 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                 )
                 logits[i, :] = float("-inf")
                 logits[i, eos_id] = 100.0
+                # Store trigger metadata for the serving layer (keyed by batch index).
+                reason = "low_entropy" if h < cfg["threshold_low"] else "high_entropy"
+                self._entropy_guardrail_triggered[i] = {
+                    "step": step,
+                    "entropy": round(h, 4),
+                    "reason": reason,
+                    "threshold": cfg["threshold_low"] if reason == "low_entropy" else cfg["threshold_high"],
+                    "window": cfg["window"],
+                }
                 # Reset counter so we don't log on every subsequent step.
                 state["consecutive_oob"] = 0
 

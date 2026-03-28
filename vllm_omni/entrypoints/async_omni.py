@@ -528,6 +528,17 @@ class AsyncOmni(OmniBase):
 
         finished = engine_outputs.finished
 
+        # Propagate entropy guardrail stop_reason across stages.
+        # Stage-0 (AR talker) sets stop_reason="entropy_guardrail:..." on its
+        # output, but only the final stage's output reaches the serving layer.
+        # Store it on the metrics aggregator so the final stage can inherit it.
+        _GUARDRAIL_PREFIX = "entropy_guardrail:"
+        for _out in getattr(engine_outputs, "outputs", []):
+            sr = getattr(_out, "stop_reason", None)
+            if isinstance(sr, str) and sr.startswith(_GUARDRAIL_PREFIX):
+                metrics._guardrail_stop_reason = sr
+                break
+
         output_to_yield = None
 
         if getattr(stage, "final_output", False):
@@ -554,6 +565,16 @@ class AsyncOmni(OmniBase):
                     request_output=engine_outputs,
                     finished=finished,
                 )
+            # Inject guardrail stop_reason from earlier stage into final output.
+            # Always prefer guardrail string over plain integer EOS token ID,
+            # since the guardrail is why the request actually stopped.
+            guardrail_sr = getattr(metrics, "_guardrail_stop_reason", None)
+            if guardrail_sr and output_to_yield is not None:
+                ro = getattr(output_to_yield, "request_output", None)
+                for _out in getattr(ro, "outputs", []):
+                    existing = getattr(_out, "stop_reason", None)
+                    if existing is None or isinstance(existing, int):
+                        _out.stop_reason = guardrail_sr
         # Mark last output time
         metrics.stage_last_ts[stage_id] = max(metrics.stage_last_ts[stage_id] or 0.0, time.time())
 
