@@ -329,6 +329,24 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
 
         self._eos_logit_bias: float = 0.0
 
+        # Entropy guardrail: per-request state keyed by id(output_token_ids list).
+        # Each entry: {"consecutive_oob": int, "cfg": dict}
+        self._entropy_state: dict[int, dict[str, Any]] = {}
+        # Default guardrail config (used when no per-request override is provided).
+        self._entropy_defaults: dict[str, Any] = {
+            "enabled": False,
+            "threshold_high": 4.5,
+            "threshold_low": 0.5,
+            "window": 5,
+        }
+        # Staging queue: preprocess appends per-request entropy configs in batch
+        # order; _apply_entropy_guardrail consumes them to initialize new entries.
+        self._entropy_config_staging: list[dict[str, Any]] = []
+        # Per-request guardrail trigger metadata, keyed by batch index.
+        # Set by _apply_entropy_guardrail, consumed by the AR model runner
+        # (gpu_ar_model_runner.py) which injects it into pooler_output.
+        self._entropy_guardrail_triggered: dict[int, dict[str, Any]] = {}
+
         self.have_multimodal_outputs = True
         self.has_preprocess = True
         self.has_postprocess = True
@@ -440,6 +458,148 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             if 0 <= eos_id < logits.shape[-1]:
                 logits[:, eos_id] = logits[:, eos_id] + self._eos_logit_bias
 
+        # Entropy guardrail: detect degeneration and force EOS.
+        logits = self._apply_entropy_guardrail(logits, sampling_metadata)
+
+        return logits
+
+    def _apply_entropy_guardrail(self, logits: torch.Tensor, sampling_metadata: Any) -> torch.Tensor:
+        """Monitor per-request entropy and force EOS when degeneration is detected.
+
+        Degeneration is signaled by entropy consistently leaving a healthy range:
+        - Spike (above threshold_high): model is lost/uncertain
+        - Collapse (below threshold_low): model is stuck in a loop
+
+        When consecutive out-of-range steps exceed the window size, the EOS token
+        logit is set very high and all others suppressed, forcing the sampler to
+        pick EOS and terminate generation cleanly.
+
+        Per-request config is stored in ``_entropy_state[key]["cfg"]`` and
+        initialized from ``_entropy_config_staging`` (populated by preprocess).
+        """
+        # Reset per-step guardrail trigger state.
+        self._entropy_guardrail_triggered.clear()
+
+        output_token_ids = getattr(sampling_metadata, "output_token_ids", None)
+        if not output_token_ids:
+            return logits
+
+        eos_id = self._codec_eos_token_id
+        if eos_id < 0 or eos_id >= logits.shape[-1]:
+            return logits
+
+        batch_size = min(logits.shape[0], len(output_token_ids))
+
+        # Consume staged configs (from preprocess) for new requests.
+        staged = self._entropy_config_staging
+        self._entropy_config_staging = []
+
+        # Check if any request in the batch has the guardrail enabled.
+        any_enabled = False
+        for i in range(batch_size):
+            key = id(output_token_ids[i])
+            state = self._entropy_state.get(key)
+            if state is not None:
+                # Guard against id() reuse: if the token count is less than
+                # what we previously tracked, the address was recycled.
+                if len(output_token_ids[i]) < state["last_step"]:
+                    del self._entropy_state[key]
+                    state = None
+            if state is not None:
+                if state["cfg"]["enabled"]:
+                    any_enabled = True
+            elif staged:
+                # New request: pop first staged config.
+                cfg = staged.pop(0)
+                if cfg["enabled"]:
+                    any_enabled = True
+                self._entropy_state[key] = {
+                    "consecutive_oob": 0,
+                    "last_step": 0,
+                    "cfg": cfg,
+                }
+            else:
+                # No staged config available; use defaults.
+                if self._entropy_defaults["enabled"]:
+                    any_enabled = True
+                self._entropy_state[key] = {
+                    "consecutive_oob": 0,
+                    "last_step": 0,
+                    "cfg": dict(self._entropy_defaults),
+                }
+
+        if not any_enabled:
+            return logits
+
+        # Compute entropy for each batch element.
+        with torch.no_grad():
+            log_probs = F.log_softmax(logits, dim=-1)
+            probs = log_probs.exp()
+            entropy = -torch.sum(probs * log_probs, dim=-1)  # shape: (batch,)
+
+        for i in range(batch_size):
+            key = id(output_token_ids[i])
+            state = self._entropy_state.get(key)
+            if state is None:
+                continue
+
+            cfg = state["cfg"]
+            if not cfg["enabled"]:
+                continue
+
+            step = len(output_token_ids[i])
+            # Skip early steps (no meaningful entropy yet).
+            if step < 2:
+                continue
+
+            h = float(entropy[i].item())
+
+            if step % 100 == 0:
+                logger.debug(
+                    "Entropy monitor: step=%d, entropy=%.3f, consecutive_oob=%d",
+                    step,
+                    h,
+                    state["consecutive_oob"],
+                )
+
+            out_of_bounds = h > cfg["threshold_high"] or h < cfg["threshold_low"]
+            if out_of_bounds:
+                state["consecutive_oob"] += 1
+            else:
+                state["consecutive_oob"] = 0
+            state["last_step"] = step
+
+            if state["consecutive_oob"] >= cfg["window"]:
+                logger.warning(
+                    "Entropy guardrail triggered at step %d (entropy=%.3f, "
+                    "consecutive_oob=%d, thresholds=[%.2f, %.2f]). Forcing EOS.",
+                    step,
+                    h,
+                    state["consecutive_oob"],
+                    cfg["threshold_low"],
+                    cfg["threshold_high"],
+                )
+                logits[i, :] = float("-inf")
+                logits[i, eos_id] = 100.0
+                # Store trigger metadata for the serving layer (keyed by batch index).
+                reason = "low_entropy" if h < cfg["threshold_low"] else "high_entropy"
+                self._entropy_guardrail_triggered[i] = {
+                    "step": step,
+                    "entropy": round(h, 4),
+                    "reason": reason,
+                    "threshold": cfg["threshold_low"] if reason == "low_entropy" else cfg["threshold_high"],
+                    "window": cfg["window"],
+                }
+                # Reset counter so we don't log on every subsequent step.
+                state["consecutive_oob"] = 0
+
+        # Prune stale entries (requests that finished).
+        if len(self._entropy_state) > batch_size * 2 + 10:
+            active_keys = {id(output_token_ids[i]) for i in range(batch_size)}
+            stale = [k for k in self._entropy_state if k not in active_keys]
+            for k in stale:
+                del self._entropy_state[k]
+
         return logits
 
     # -------------------- Omni multimodal output plumbing --------------------
@@ -506,6 +666,35 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             mm["codec_streaming"] = torch.cat(codec_streaming_list, dim=0)[:span_len]
         return OmniOutput(text_hidden_states=hidden, multimodal_outputs=mm)
 
+    # -------------------- entropy guardrail config --------------------
+
+    def _update_entropy_config_from_info(self, info_dict: dict[str, Any]) -> None:
+        """Stage per-request entropy guardrail config for consumption by compute_logits.
+
+        Builds a config dict from per-request additional_information, falling back
+        to model-level defaults for any unset parameters. The config is appended to
+        ``_entropy_config_staging`` and consumed in batch order by
+        ``_apply_entropy_guardrail`` when initializing new per-request state.
+        """
+
+        def _first(val: Any) -> Any:
+            return val[0] if isinstance(val, list) and val else val
+
+        cfg = dict(self._entropy_defaults)  # copy defaults
+        eg = _first(info_dict.get("entropy_guardrail"))
+        if eg is not None:
+            cfg["enabled"] = bool(eg)
+        eth = _first(info_dict.get("entropy_threshold_high"))
+        if eth is not None:
+            cfg["threshold_high"] = float(eth)
+        etl = _first(info_dict.get("entropy_threshold_low"))
+        if etl is not None:
+            cfg["threshold_low"] = float(etl)
+        ew = _first(info_dict.get("entropy_window"))
+        if ew is not None:
+            cfg["window"] = int(ew)
+        self._entropy_config_staging.append(cfg)
+
     # -------------------- preprocess / postprocess --------------------
 
     def preprocess(
@@ -521,6 +710,9 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             for k, v in additional_information.items():
                 merged.setdefault(k, v)
             info_dict = merged
+
+        # Update entropy guardrail config from per-request additional_information.
+        self._update_entropy_config_from_info(info_dict)
 
         span_len = int(input_ids.shape[0])
         if span_len <= 0:
@@ -646,13 +838,13 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         }
         return input_ids, inputs_embeds_out, info_update
 
-    def postprocess(self, hidden_states: torch.Tensor, **_: Any) -> dict[str, Any]:
+    def postprocess(self, hidden_states: torch.Tensor, **kwargs: Any) -> dict[str, Any]:
         # Keep the last token hidden for the next decode step's code predictor.
         # Stays on GPU - gpu_resident_buffer_keys avoids the CPU round-trip.
         if hidden_states.numel() == 0:
             return {}
-        last = hidden_states[-1, :].detach()
-        return {"last_talker_hidden": last}
+        result: dict[str, Any] = {"last_talker_hidden": hidden_states[-1, :].detach()}
+        return result
 
     # -------------------- prompt construction helpers --------------------
 
