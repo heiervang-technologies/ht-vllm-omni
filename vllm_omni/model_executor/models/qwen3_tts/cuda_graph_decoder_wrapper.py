@@ -111,7 +111,6 @@ class CUDAGraphDecoderWrapper:
 
         torch.cuda.synchronize(device)
 
-
         for size in self.capture_sizes:
             try:
                 self._capture(size, device, dtype)
