@@ -214,6 +214,7 @@ class Qwen3TTSCode2Wav(nn.Module):
         valid_codes_qf: list[torch.Tensor] = []
         valid_indices: list[int] = []
         left_context_size = [0] * len(request_ids_list)
+        guardrail_triggers: list[dict[str, Any] | None] = [None] * len(request_ids_list)
         if runtime_additional_information is not None:
             for i, info in enumerate(runtime_additional_information):
                 if i >= len(left_context_size):
@@ -226,6 +227,10 @@ class Qwen3TTSCode2Wav(nn.Module):
                     if isinstance(value, torch.Tensor):
                         value = value.reshape(-1)[0].item() if value.numel() > 0 else 0
                     left_context_size[i] = int(value)
+                # Pass through entropy guardrail trigger metadata.
+                gt = info.get("entropy_guardrail_triggered")
+                if gt is not None and i < len(guardrail_triggers):
+                    guardrail_triggers[i] = gt
         for i, req_ids in enumerate(request_ids_list):
             if req_ids.numel() < 1:
                 parsed.append((0, 0))
@@ -307,10 +312,23 @@ class Qwen3TTSCode2Wav(nn.Module):
             if wav.shape[0] > 0:
                 audios[idx] = wav.to(dtype=torch.float32).reshape(-1)
 
-        return OmniOutput(
-            text_hidden_states=None,
-            multimodal_outputs={"model_outputs": audios, "sr": srs},
-        )
+        mm: dict[str, Any] = {"model_outputs": audios, "sr": srs}
+        # Include entropy guardrail trigger metadata as a JSON-encoded
+        # byte tensor per request.  Encoding as tensors is required because
+        # the generation model runner only handles tensor values in the
+        # multimodal output dict (non-tensors are dropped with a warning).
+        if any(g is not None for g in guardrail_triggers):
+            import json as _json
+
+            encoded: list[torch.Tensor] = []
+            for g in guardrail_triggers:
+                if g is not None:
+                    raw = _json.dumps(g).encode("utf-8")
+                    encoded.append(torch.frombuffer(bytearray(raw), dtype=torch.uint8))
+                else:
+                    encoded.append(torch.zeros(0, dtype=torch.uint8))
+            mm["entropy_guardrail_triggered"] = encoded
+        return OmniOutput(text_hidden_states=None, multimodal_outputs=mm)
 
     def make_omni_output(self, model_outputs: torch.Tensor | OmniOutput, **kwargs: Any) -> OmniOutput:
         if isinstance(model_outputs, OmniOutput):

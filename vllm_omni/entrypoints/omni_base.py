@@ -250,6 +250,17 @@ class OmniBase:
         peak_memory_mb = getattr(result["engine_outputs"], "peak_memory_mb", 0.0)
         finished = engine_outputs.finished
 
+        # Propagate entropy guardrail stop_reason across stages.
+        # Stage-0 (AR talker) sets stop_reason="entropy_guardrail:..." on its
+        # output, but only the final stage's output reaches the serving layer.
+        # Store it on the metrics aggregator so the final stage can inherit it.
+        _GUARDRAIL_PREFIX = "entropy_guardrail:"
+        for _out in getattr(engine_outputs, "outputs", []):
+            sr = getattr(_out, "stop_reason", None)
+            if isinstance(sr, str) and sr.startswith(_GUARDRAIL_PREFIX):
+                metrics._guardrail_stop_reason = sr
+                break
+
         submit_ts = result.get("stage_submit_ts")
         now = time.time()
         if metrics.stage_first_ts[stage_id] is None:
@@ -276,7 +287,7 @@ class OmniBase:
             logger.exception("[%s] Finalize request handling error", self.__class__.__name__)
 
         images = getattr(engine_outputs, "images", []) if stage_meta["final_output_type"] == "image" else []
-        return OmniRequestOutput(
+        omni_output = OmniRequestOutput(
             request_id=req_id or "",
             stage_id=stage_id,
             final_output_type=stage_meta["final_output_type"],
@@ -285,6 +296,19 @@ class OmniBase:
             stage_durations=stage_durations,
             peak_memory_mb=peak_memory_mb,
         )
+
+        # Inject guardrail stop_reason from earlier stage into final output.
+        # Always prefer guardrail string over plain integer EOS token ID,
+        # since the guardrail is why the request actually stopped.
+        guardrail_sr = getattr(metrics, "_guardrail_stop_reason", None)
+        if guardrail_sr and omni_output is not None:
+            ro = getattr(omni_output, "request_output", None)
+            for _out in getattr(ro, "outputs", []):
+                existing = getattr(_out, "stop_reason", None)
+                if existing is None or isinstance(existing, int):
+                    _out.stop_reason = guardrail_sr
+
+        return omni_output
 
     def shutdown(self) -> None:
         logger.info("[%s] Shutting down", self.__class__.__name__)
