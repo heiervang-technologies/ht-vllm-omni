@@ -69,9 +69,12 @@ from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
 from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.entrypoints.serve.disagg.serving import ServingTokens
 
-# vLLM moved `base` from openai.basic.api_router to serve.instrumentator.basic.
-# Keep a fallback for older/newer upstream layouts during rebase windows.
-from vllm.entrypoints.serve.instrumentator.basic import base
+# vLLM moved `base` from openai.basic.api_router to serve.instrumentator.basic
+# (available in >=0.18). Keep a fallback for 0.16.x layouts.
+try:
+    from vllm.entrypoints.serve.instrumentator.basic import base
+except (ImportError, ModuleNotFoundError):
+    from vllm.entrypoints.openai.api_server import base
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
