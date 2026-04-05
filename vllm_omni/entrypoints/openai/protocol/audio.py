@@ -2,7 +2,7 @@ import math
 from typing import Literal
 
 import numpy as np
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 _MAX_EMBEDDING_DIM = 8192
 
@@ -12,6 +12,7 @@ class OpenAICreateSpeechRequest(BaseModel):
     model: str | None = None
     voice: str | None = Field(
         default=None,
+        validation_alias=AliasChoices("voice", "speaker"),
         description="Speaker/voice to use. For Qwen3-TTS: vivian, ryan, aiden, etc.",
     )
     instructions: str | None = Field(
