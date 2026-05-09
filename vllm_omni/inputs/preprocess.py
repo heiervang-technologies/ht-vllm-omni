@@ -15,7 +15,17 @@ except ImportError:
 
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
-from vllm.multimodal.inputs import MultiModalInputs
+
+try:
+    # vllm <= 0.18 kept MultiModalInputs in vllm.multimodal.inputs.
+    from vllm.multimodal.inputs import MultiModalInputs
+except ImportError:
+    try:
+        # vllm 0.19+ moved + renamed: MultiModalInputs -> vllm.inputs.engine.MultiModalInput
+        from vllm.inputs.engine import MultiModalInput as MultiModalInputs
+    except ImportError:
+        from vllm.inputs import MultiModalInput as MultiModalInputs
+
 from vllm.renderers.inputs import SingletonDictPrompt
 
 from vllm_omni.inputs.data import (
