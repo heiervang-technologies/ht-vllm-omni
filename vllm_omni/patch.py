@@ -65,8 +65,12 @@ try:
     _orig_compilation_init = _OriginalCompilationConfig.__init__
 
     def _patched_compilation_init(self, *args, **kwargs):
+        # Coerce None to a non-empty default. vllm 0.19's VllmConfig model-level
+        # validator rejects empty lists when cudagraphs are enabled
+        # ("cudagraph_capture_sizes should contain at least one element"), so []
+        # alone is not sufficient. Use a small TTS-appropriate set.
         if kwargs.get("cudagraph_capture_sizes") is None and "cudagraph_capture_sizes" in kwargs:
-            kwargs["cudagraph_capture_sizes"] = []
+            kwargs["cudagraph_capture_sizes"] = [1, 2, 4, 8]
         pass_config = kwargs.get("pass_config")
         if isinstance(pass_config, dict) and pass_config.get("fuse_minimax_qk_norm") is None:
             pass_config["fuse_minimax_qk_norm"] = False
