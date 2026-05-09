@@ -69,10 +69,18 @@ try:
         # validator rejects empty lists when cudagraphs are enabled
         # ("cudagraph_capture_sizes should contain at least one element"), so []
         # alone is not sufficient. Use a small TTS-appropriate set.
-        if kwargs.get("cudagraph_capture_sizes") is None and "cudagraph_capture_sizes" in kwargs:
+        # Important: only coerce keys that are EXPLICITLY present with value
+        # None — never inject a key that wasn't already there. v0.18's
+        # CompilationConfig has pydantic extra="forbid" and rejects unknown
+        # fields like fuse_minimax_qk_norm (which doesn't exist in 0.18 yet).
+        if "cudagraph_capture_sizes" in kwargs and kwargs["cudagraph_capture_sizes"] is None:
             kwargs["cudagraph_capture_sizes"] = [1, 2, 4, 8]
         pass_config = kwargs.get("pass_config")
-        if isinstance(pass_config, dict) and pass_config.get("fuse_minimax_qk_norm") is None:
+        if (
+            isinstance(pass_config, dict)
+            and "fuse_minimax_qk_norm" in pass_config
+            and pass_config["fuse_minimax_qk_norm"] is None
+        ):
             pass_config["fuse_minimax_qk_norm"] = False
         return _orig_compilation_init(self, *args, **kwargs)
 
