@@ -50,6 +50,32 @@ except ImportError:
     # GlmImageTextConfig not available, skip patching
     pass
 
+# =============================================================================
+# Patch CompilationConfig for vllm 0.19+ pydantic strictness
+# =============================================================================
+# vllm 0.19 made CompilationConfig a pydantic BaseModel and tightened the type
+# annotations on `cudagraph_capture_sizes` (now `list[int]`) and
+# `pass_config.fuse_minimax_qk_norm` (now `bool`). vllm's own EngineArgs CLI
+# parsing still leaves these as None in the dict it later passes to
+# CompilationConfig(**dict), which pydantic 2.13 then rejects with a
+# validation error. Coerce None → safe defaults before original __init__.
+try:
+    from vllm.config import CompilationConfig as _OriginalCompilationConfig
+
+    _orig_compilation_init = _OriginalCompilationConfig.__init__
+
+    def _patched_compilation_init(self, *args, **kwargs):
+        if kwargs.get("cudagraph_capture_sizes") is None and "cudagraph_capture_sizes" in kwargs:
+            kwargs["cudagraph_capture_sizes"] = []
+        pass_config = kwargs.get("pass_config")
+        if isinstance(pass_config, dict) and pass_config.get("fuse_minimax_qk_norm") is None:
+            pass_config["fuse_minimax_qk_norm"] = False
+        return _orig_compilation_init(self, *args, **kwargs)
+
+    _OriginalCompilationConfig.__init__ = _patched_compilation_init
+except (ImportError, AttributeError):
+    pass
+
 # Extend RequestStatus enum with omni-specific statuses
 if not hasattr(RequestStatus, "WAITING_FOR_CHUNK"):
     # The value - 1 is intentionally chosen to ensure it is treated
