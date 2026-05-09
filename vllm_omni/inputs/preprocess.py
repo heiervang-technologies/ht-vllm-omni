@@ -1,7 +1,18 @@
 from typing import Any
 
 from typing_extensions import assert_never
-from vllm.inputs.data import EmbedsInputs, SingletonInputs
+
+try:
+    # vllm 0.16-0.19 expose plural names re-exported at the package level.
+    from vllm.inputs import EmbedsInputs, SingletonInputs
+except ImportError:
+    try:
+        # vllm 0.20+ renamed plural → singular.
+        from vllm.inputs import EmbedsInput as EmbedsInputs
+        from vllm.inputs import SingletonInput as SingletonInputs
+    except ImportError:
+        from vllm.inputs.data import EmbedsInputs, SingletonInputs
+
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalInputs

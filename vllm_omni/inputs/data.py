@@ -16,7 +16,12 @@ except ImportError:
 
 
 import torch
-from vllm.inputs.data import EmbedsPrompt, TextPrompt, TokenInputs, TokensPrompt
+
+try:
+    # vllm >= 0.19 re-exports at the package level; vllm.inputs.data was removed.
+    from vllm.inputs import EmbedsPrompt, TextPrompt, TokenInputs, TokensPrompt
+except ImportError:
+    from vllm.inputs.data import EmbedsPrompt, TextPrompt, TokenInputs, TokensPrompt
 
 
 class OmniTextPrompt(TextPrompt):

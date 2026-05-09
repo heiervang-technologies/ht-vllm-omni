@@ -1,7 +1,14 @@
 import sys
 
 from aenum import extend_enum
-from vllm.inputs.data import TokensPrompt as _OriginalTokensPrompt
+
+try:
+    # vllm >= 0.19 re-exports at the package level; vllm.inputs.data was removed.
+    from vllm.inputs import TokensPrompt as _OriginalTokensPrompt
+except ImportError:
+    # Fallback for vllm <= 0.18 where TokensPrompt lived in the data submodule.
+    from vllm.inputs.data import TokensPrompt as _OriginalTokensPrompt
+
 from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding as _OriginalMRotaryEmbedding,
 )
