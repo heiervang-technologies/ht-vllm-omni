@@ -355,7 +355,9 @@ class AsyncOmniEngine:
                         log_stats=False,
                         addresses=addresses,
                     )
-                    engine_manager, coordinator, addresses = launch_cm.__enter__()
+                    # vllm 0.19+ yields a 4-tuple (added tensor_queue or similar);
+                    # 0.16 yielded a 3-tuple. Use starred unpack to tolerate both.
+                    engine_manager, coordinator, addresses, *_extra = launch_cm.__enter__()
                     started_stage = StartedLlmStage(
                         stage_id=metadata.stage_id,
                         metadata=metadata,
