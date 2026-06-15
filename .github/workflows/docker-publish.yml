@@ -48,13 +48,36 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=
 
-      - name: Build and push (CUDA)
+      - name: Build (CUDA, load locally for import gate)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile.slim
-          push: true
+          load: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Import gate
+        # Boots the CLI entrypoint with --help; fails the workflow on any
+        # ImportError before the image reaches the registry. Caught the
+        # vllm-0.20-path-validation class of regression in the 2026-05-12 rebase.
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          FIRST_TAG=$(printf '%s\n' "$TAGS" | head -n1)
+          echo "Running import gate against $FIRST_TAG"
+          docker run --rm --entrypoint python "$FIRST_TAG" \
+            -m vllm_omni.entrypoints.cli.main serve --help >/dev/null
+
+      - name: Push (CUDA)
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker push "$tag"
+          done <<<"$TAGS"
