@@ -147,11 +147,20 @@ class Qwen3TTSCode2Wav(nn.Module):
             n = flat.numel()
             if n == 0 or n % q != 0:
                 if n > 0:
-                    logger.warning(
-                        "Code2Wav input_ids length %d not divisible by num_quantizers %d; skipping malformed request.",
-                        n,
-                        q,
-                    )
+                    if n > q * 12:
+                        logger.warning(
+                            "Code2Wav skip: input_ids length %d not divisible by num_quantizers %d. "
+                            "This skip has persisted past the first second of output and may indicate a broken sequence.",
+                            n,
+                            q,
+                        )
+                    else:
+                        logger.debug(
+                            "Code2Wav skip: input_ids length %d not divisible by num_quantizers %d "
+                            "(expected during streaming chunk-buffer setup; non-fatal).",
+                            n,
+                            q,
+                        )
                 parsed.append((0, 0))
                 continue
             frames = n // q
