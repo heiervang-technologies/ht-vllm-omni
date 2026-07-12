@@ -1054,9 +1054,12 @@ class ImageKVCacheManager:
 
         attention_mask = attention_mask.contiguous()
 
+        full_attn_spans = kwargs.get("full_attn_spans", None)
+
         if self.sp_size <= 1:
             attn_metadata = AttentionMetadata(
                 attn_mask=attention_mask,
+                full_attn_spans=full_attn_spans,
             )
         else:
             attn_metadata = AttentionMetadata(
@@ -1065,6 +1068,7 @@ class ImageKVCacheManager:
                 joint_value=joint_text_value,
                 joint_strategy="front",
                 attn_mask=attention_mask,
+                full_attn_spans=full_attn_spans,
             )
         attn_output = self.attn(query, key, value, attn_metadata)
         attn_output = attn_output.reshape(bs * q_len, head_num_per_rank, head_dim)
@@ -2035,6 +2039,44 @@ class HunyuanImage3Model(nn.Module):
                     return True
             return False
 
+        def is_scalar_quant_scale(name: str, tensor: torch.Tensor) -> bool:
+            return tensor.numel() == 1 and name.endswith((".input_scale", ".weight_scale"))
+
+        def load_split_param(
+            name: str,
+            tensor: torch.Tensor,
+            den: int,
+            split_param: list[tuple[str | int, int]],
+            func: Callable[[torch.Tensor], torch.Tensor] | None,
+        ) -> None:
+            param = params_dict[name]
+            weight_loader = param.weight_loader
+            if is_scalar_quant_scale(name, tensor):
+                for shard_id, _ in split_param:
+                    weight_loader(param, tensor, shard_id)
+                return
+
+            assert tensor.shape[0] % den == 0
+            units = tensor.shape[0] // den
+            offset = 0
+            tensor = func(tensor) if func else tensor
+            for shard_id, num in split_param:
+                new_offset = offset + num * units
+                weight_loader(param, tensor[offset:new_offset], shard_id)
+                offset = new_offset
+
+        def get_loaded_weight_shard(
+            name: str,
+            tensor: torch.Tensor,
+            offset: int,
+            den: int,
+        ) -> torch.Tensor:
+            if is_scalar_quant_scale(name, tensor):
+                return tensor
+            assert tensor.shape[0] % den == 0
+            units = tensor.shape[0] // den
+            return tensor[offset * units : offset * units + units]
+
         for name, loaded_weight in weights:
             # print(f"Loading weight name: {name}, tp_rank: {tp_rank}", flush=True)
             if contains_unexpected_keyword(name, unexpected_keywords):
@@ -2112,19 +2154,7 @@ class HunyuanImage3Model(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
 
-                assert loaded_weight.shape[0] % den == 0
-                units = loaded_weight.shape[0] // den
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                offset = 0
-                for shard_id, num in split_param:
-                    new_offset = offset + num * units
-                    if func:
-                        weight_loader(param, func(loaded_weight)[offset:new_offset], shard_id)
-                    else:
-                        weight_loader(param, loaded_weight[offset:new_offset], shard_id)
-                    offset = new_offset
-
+                load_split_param(name, loaded_weight, den, split_param, func)
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
@@ -2154,12 +2184,11 @@ class HunyuanImage3Model(nn.Module):
                         continue
                     param = params_dict[name_mapped]
                     weight_loader = cast(Callable[..., bool], param.weight_loader)
-                    assert loaded_weight.shape[0] % den == 0
-                    units = loaded_weight.shape[0] // den
+                    loaded_weight_shard = get_loaded_weight_shard(name, loaded_weight, offset, den)
 
                     success = weight_loader(
                         param,
-                        loaded_weight[offset * units : offset * units + units],
+                        loaded_weight_shard,
                         name_mapped,
                         shard_id=shard_id,
                         expert_id=expert_id,
@@ -2221,6 +2250,7 @@ class HunyuanImage3Model(nn.Module):
         num_image_tokens: int | None = None,
         gen_timestep_scatter_index: torch.Tensor | None = None,
         uncond_cfg_prefill: bool = False,
+        full_attn_spans: list[list[tuple[int, int]]] | None = None,
     ) -> tuple | BaseModelOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -2329,6 +2359,7 @@ class HunyuanImage3Model(nn.Module):
                 shard_image_size=shard_image_size,
                 shard_padding_size=shard_padding_size,
                 uncond_cfg_prefill=uncond_cfg_prefill,
+                full_attn_spans=full_attn_spans,
             )
 
             hidden_states = layer_outputs[0]
@@ -2569,6 +2600,10 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
             if key in model_kwargs and model_kwargs[key] is not None:
                 model_kwargs[key] = model_kwargs[key][s]
 
+        # List[List[...]] per-sample metadata indexed along the CFG batch dim
+        if isinstance(model_kwargs.get("full_attn_spans"), list):
+            model_kwargs["full_attn_spans"] = model_kwargs["full_attn_spans"][s.start : s.stop]
+
         # custom_pos_emb: tuple of (cos, sin)
         if "custom_pos_emb" in model_kwargs and model_kwargs["custom_pos_emb"] is not None:
             cos, sin = model_kwargs["custom_pos_emb"]
@@ -2699,6 +2734,9 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
             query_lens=[prefill_query_len],
             seq_lens=[prefill_seq_len],
             num_image_tokens=0,
+            full_attn_spans=model_kwargs["full_attn_spans"][batch_slice]
+            if model_kwargs.get("full_attn_spans")
+            else None,
         )
 
     # ==========================================================

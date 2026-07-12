@@ -1,0 +1,83 @@
+name: Build and Push Docker Images
+
+on:
+  push:
+    branches:
+      - ht
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-cuda:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo apt-get clean
+          df -h
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+
+      - name: Build (CUDA, load locally for import gate)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.slim
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Import gate
+        # Boots the CLI entrypoint with --help; fails the workflow on any
+        # ImportError before the image reaches the registry. Caught the
+        # vllm-0.20-path-validation class of regression in the 2026-05-12 rebase.
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          FIRST_TAG=$(printf '%s\n' "$TAGS" | head -n1)
+          echo "Running import gate against $FIRST_TAG"
+          docker run --rm --entrypoint python "$FIRST_TAG" \
+            -m vllm_omni.entrypoints.cli.main serve --help >/dev/null
+
+      - name: Push (CUDA)
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker push "$tag"
+          done <<<"$TAGS"

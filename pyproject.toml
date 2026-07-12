@@ -62,7 +62,10 @@ dev = [
     "funasr>=1.0.0",
     "lpips>=0.1.4", # for quantization fp8
     "orjson>=3.11.7", # to make v1/embeddings API fast
-    "voxcpm>=2.0.2" # for voxcpm model test
+    "voxcpm>=2.0.2", # for voxcpm model test
+    # HT additions (1a0567ef): numpy 2.3 compatibility; librosa for streaming TTS scripts
+    "librosa>=0.11.0",
+    "numba>=0.62",
 ]
 
 demo = [

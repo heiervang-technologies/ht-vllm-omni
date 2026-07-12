@@ -643,6 +643,45 @@ class TestSpeechAPI:
         assert response.status_code == 400
         assert "finite" in response.json()["detail"]
 
+    @pytest.mark.asyncio
+    async def test_create_diffusion_speech_extra_params(self, mocker: MockerFixture):
+        """Test that extra_params are correctly applied to sampling_params_list in diffusion mode."""
+        # Mock the engine client
+        mock_engine = mocker.MagicMock()
+
+        # Mock default sampling params
+        mock_sampling_param = mocker.MagicMock()
+        mock_sampling_param.extra_args = {"existing_arg": "value"}
+        mock_engine.default_sampling_params_list = [mock_sampling_param]
+
+        # Mock generate to yield a valid OmniRequestOutput
+        async def mock_generate(*args, **kwargs):
+            yield create_mock_audio_output_for_test()
+
+        mock_engine.generate = mocker.MagicMock(side_effect=mock_generate)
+
+        server = OmniOpenAIServingSpeech.for_diffusion(diffusion_engine=mock_engine, model_name="test-model")
+
+        # Mock create_audio to avoid actual audio processing/saving
+        mocker.patch.object(
+            server, "create_audio", return_value=mocker.MagicMock(audio_data=b"dummy", media_type="audio/wav")
+        )
+
+        req = OpenAICreateSpeechRequest(input="Hello", extra_params={"new_arg": 123, "existing_arg": "new_value"})
+
+        await server._create_diffusion_speech(req)
+
+        # Verify generate was called
+        mock_engine.generate.assert_called_once()
+
+        # Get the sampling_params_list passed to generate
+        kwargs = mock_engine.generate.call_args.kwargs
+        passed_params = kwargs["sampling_params_list"]
+
+        # Verify it was deepcopied and updated
+        assert passed_params is not mock_engine.default_sampling_params_list
+        assert passed_params[0].extra_args == {"existing_arg": "new_value", "new_arg": 123}
+
 
 class TestTTSMethods:
     """Unit tests for TTS validation and parameter building."""
@@ -1541,6 +1580,17 @@ class TestStreamingResponse:
         assert response.status_code == 200
         assert "audio/wav" in response.headers["content-type"]
 
+    def test_streaming_yields_multiple_chunks(self, streaming_app):
+        """Streaming PCM body must contain data from both engine chunks."""
+        client = TestClient(streaming_app)
+        response = client.post("/v1/audio/speech", json={"input": "Hello", "stream": True, "response_format": "pcm"})
+        assert response.status_code == 200
+        # The mock yields two 24000-sample chunks (each ~48000 bytes as int16).
+        # The response should contain substantially more than a single chunk.
+        assert len(response.content) > 48000, (
+            f"Expected data from multiple chunks, got only {len(response.content)} bytes"
+        )
+
 
 class TestSpeechBatchAPI:
     """Tests for the /v1/audio/speech/batch endpoint."""
@@ -2410,3 +2460,55 @@ class TestTTSAsyncOffloading:
         server = OmniOpenAIServingSpeech.for_diffusion(diffusion_engine=mocker.MagicMock(), model_name="test-model")
         assert server._tts_executor is None
         server.shutdown()  # Should not raise
+
+
+# HT addition: covers the key-aware walk semantic that upstream's _extract_audio_output
+# lacks. Kept until an upstream PR (planned from marksverdhei) lands the same logic.
+class TestExtractAudioOutput:
+    """Tests for OmniOpenAIServingSpeech._extract_audio_output."""
+
+    def test_extracts_from_multimodal_output_property(self):
+        """Extracts audio from res.multimodal_output dict."""
+
+        class FakeRes:
+            multimodal_output = {"audio": torch.zeros(100)}
+
+        mm, key = OmniOpenAIServingSpeech._extract_audio_output(FakeRes())
+        assert key == "audio"
+        assert mm is FakeRes.multimodal_output
+
+    def test_extracts_model_outputs_key(self):
+        """Falls back to 'model_outputs' key."""
+
+        class FakeRes:
+            multimodal_output = {"model_outputs": [torch.zeros(100)]}
+
+        mm, key = OmniOpenAIServingSpeech._extract_audio_output(FakeRes())
+        assert key == "model_outputs"
+
+    def test_returns_none_for_empty(self):
+        """Returns (None, None) when no audio present."""
+
+        class FakeRes:
+            multimodal_output = {}
+            request_output = None
+
+        mm, key = OmniOpenAIServingSpeech._extract_audio_output(FakeRes())
+        assert mm is None
+        assert key is None
+
+    def test_extracts_from_completion_output(self):
+        """Falls back to walking request_output.outputs[]."""
+
+        class FakeOutput:
+            multimodal_output = {"audio": torch.ones(50)}
+
+        class FakeRequestOutput:
+            outputs = [FakeOutput()]
+
+        class FakeRes:
+            multimodal_output = {}
+            request_output = FakeRequestOutput()
+
+        mm, key = OmniOpenAIServingSpeech._extract_audio_output(FakeRes())
+        assert key == "audio"

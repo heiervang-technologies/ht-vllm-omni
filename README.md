@@ -1,17 +1,59 @@
+<!-- markdownlint-disable MD001 MD041 -->
+<h1 align="center">ht-vllm-omni</h1>
+
+<p align="center">
+    <em>Heiervang Technologies fork of <a href="https://github.com/vllm-project/vllm-omni">vLLM-Omni</a></em>
+</p>
+
+<p align="center">
+    <a href="https://github.com/orgs/heiervang-technologies/discussions">HT Discussions</a> |
+    <a href="https://github.com/orgs/heiervang-technologies/discussions/3">Fork Management Guide</a> |
+    <a href="https://github.com/vllm-project/vllm-omni">Upstream Project</a> |
+    <a href="https://vllm-omni.readthedocs.io/en/latest/"><b>Documentation</b></a> |
+    <a href="https://arxiv.org/abs/2602.02204"><b>Paper</b></a> |
+    <a href="https://discuss.vllm.ai"><b>User Forum</b></a> |
+    <a href="https://slack.vllm.ai"><b>Developer Slack</b></a>
+</p>
+
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm-omni/refs/heads/main/docs/source/logos/vllm-omni-logo.png">
-    <img alt="vllm-omni" src="https://raw.githubusercontent.com/vllm-project/vllm-omni/refs/heads/main/docs/source/logos/vllm-omni-logo.png" width=55%>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/source/logos/ht-vllm-omni-logo.png">
+    <img alt="ht-vllm-omni" src="docs/source/logos/ht-vllm-omni-logo.png" width=55%>
   </picture>
 </p>
 <h3 align="center">
 Easy, fast, and cheap omni-modality model serving for everyone
 </h3>
 
-<p align="center">
-| <a href="https://vllm-omni.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href="https://discuss.vllm.ai"><b>User Forum</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a> | <a href="docs/assets/WeChat.jpg"><b>WeChat</b></a> | <a href="https://arxiv.org/abs/2602.02204"><b>Paper</b></a> | <a href="https://docs.google.com/presentation/d/1XJWgv79lORl8rbaVvp2d5Sqs6ZEBgAgj/edit?slide=id.p1#slide=id.p1"><b>Slides</b></a> |
-</p>
 
+
+
+---
+
+## HT Fork Changes
+
+This is the [Heiervang Technologies](https://github.com/heiervang-technologies) fork of vLLM-Omni. The `ht` branch contains the following changes on top of upstream `main`:
+
+### Qwen3 TTS Streaming
+- Progressive WAV/PCM HTTP streaming with robust audio output extraction
+- Scalar tensor metadata handling in output processor (fixes streaming accumulation)
+- `tts-stream` bash tool for low-latency streaming playback
+- Python streaming client with latency benchmarks
+- E2E tests for streaming (PCM output, silence check, chunked transfer, validation)
+
+### Speaker Embedding *(merged upstream — [#1227](https://github.com/vllm-project/vllm-omni/pull/1227))*
+- ~~`speaker_embedding` API parameter for direct voice cloning (bypasses ref_audio)~~
+- ~~Speaker embedding extraction and SLERP interpolation example~~
+- ~~E2E tests for 0.6B-Base, 0.6B-CustomVoice, and 1.7B-Base models~~
+
+### Qwen3 TTS Performance
+- ~~CUDA graph support for speech tokenizer decoder~~ *(merged upstream — [#1617](https://github.com/vllm-project/vllm-omni/pull/1617))*
+- CUDA graph warmup for talker speech tokenizer decoder (`enable_cudagraph` on load)
+
+### CI/Infrastructure
+- GHCR Docker build workflow (`Dockerfile.slim`)
+- Fork sync automation
+- Pre-commit on PRs targeting `ht` branch
 
 ---
 
