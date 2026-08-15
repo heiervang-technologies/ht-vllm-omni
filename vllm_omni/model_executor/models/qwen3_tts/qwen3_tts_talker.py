@@ -439,6 +439,10 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor, **_: Any) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    def _model_dtype(self) -> torch.dtype:
+        """Return the configured model dtype; never assume BF16 is executable."""
+        return next(self.model.parameters()).dtype
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -566,6 +570,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             raise ValueError("Missing additional_information.text for Qwen3-TTS AR talker.")
 
         task_type = (info_dict.get("task_type") or ["CustomVoice"])[0]
+        model_dtype = self._model_dtype()
         codec_streaming_val = meta.get("codec_streaming")
         if isinstance(codec_streaming_val, list):
             codec_streaming_raw = codec_streaming_val[0] if codec_streaming_val else None
@@ -582,7 +587,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             tts_pad_embed_cpu = embed.get("tts_pad")
             tts_pad_embed = None
             if isinstance(tts_pad_embed_cpu, torch.Tensor) and tts_pad_embed_cpu.numel() > 0:
-                tts_pad_embed = tts_pad_embed_cpu.to(device=input_ids.device, dtype=torch.bfloat16).reshape(1, -1)
+                tts_pad_embed = tts_pad_embed_cpu.to(device=input_ids.device, dtype=model_dtype).reshape(1, -1)
 
             # First prefill round: prompt_embeds_cpu is not yet populated.
             # Subsequent prefill rounds (multi-chunk): prompt_embeds_cpu is a Tensor stored by the first round.
@@ -616,7 +621,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                     pad_n = int(span_len - int(take.shape[0]))
                     pad_rows = tts_pad_embed.reshape(1, -1).to("cpu").expand(pad_n, -1)
                     take = torch.cat([take, pad_rows], dim=0)
-                prompt_embeds = take.to(device=input_ids.device, dtype=torch.bfloat16)
+                prompt_embeds = take.to(device=input_ids.device, dtype=model_dtype)
                 info_update["meta"]["talker_prefill_offset"] = int(offset + span_len)
             else:
                 # Subsequent prefill chunk: slice from stored embeddings at running offset.
@@ -632,7 +637,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                     pad_n = int(span_len - int(take.shape[0]))
                     pad_rows = tts_pad_embed.reshape(1, -1).to("cpu").expand(pad_n, -1)
                     take = torch.cat([take, pad_rows], dim=0)
-                prompt_embeds = take.to(device=input_ids.device, dtype=torch.bfloat16)
+                prompt_embeds = take.to(device=input_ids.device, dtype=model_dtype)
                 info_update = {
                     "meta": {"talker_prefill_offset": int(offset + span_len), "codec_streaming": codec_streaming}
                 }
@@ -655,11 +660,11 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         tts_pad_embed_buf = embed.get("tts_pad")
         if not isinstance(tts_pad_embed_buf, torch.Tensor):
             raise RuntimeError("Missing `tts_pad_embed` in additional_information; prefill must run first.")
-        tts_pad_embed = tts_pad_embed_buf.to(device=input_ids.device, dtype=torch.bfloat16).reshape(1, -1)
+        tts_pad_embed = tts_pad_embed_buf.to(device=input_ids.device, dtype=model_dtype).reshape(1, -1)
 
         tail = hs.get("trailing_text")
         if isinstance(tail, torch.Tensor) and tail.ndim == 2 and tail.shape[0] > 0:
-            text_step = tail[:1].to(device=input_ids.device, dtype=torch.bfloat16).reshape(1, -1)
+            text_step = tail[:1].to(device=input_ids.device, dtype=model_dtype).reshape(1, -1)
             new_tail = tail[1:] if tail.shape[0] > 1 else tail[:0]
         else:
             text_step = tts_pad_embed
@@ -668,11 +673,11 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         last_hidden = hs.get("last")
         if not isinstance(last_hidden, torch.Tensor):
             raise RuntimeError("Missing hidden_states['last'] in additional_information; postprocess must run.")
-        past_hidden = last_hidden.to(device=input_ids.device, dtype=torch.bfloat16).reshape(1, -1)
+        past_hidden = last_hidden.to(device=input_ids.device, dtype=model_dtype).reshape(1, -1)
 
         # Use OmniGPUModelRunner talker_mtp fast-path for residual codebooks and per-step inputs_embeds update.
         last_id_hidden = self.embed_input_ids(input_ids.reshape(1, 1).to(torch.long)).to(
-            device=input_ids.device, dtype=torch.bfloat16
+            device=input_ids.device, dtype=model_dtype
         )
         inputs_embeds_out = last_id_hidden.reshape(1, -1)
 
@@ -1108,10 +1113,11 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         # CUDA. Ensure the speaker encoder is on the same device/dtype as the
         # main model before running it.
         dev = next(self.parameters()).device
+        model_dtype = self._model_dtype()
         try:
             spk_param = next(self.speaker_encoder.parameters())
-            if spk_param.device != dev or spk_param.dtype != torch.bfloat16:
-                self.speaker_encoder.to(device=dev, dtype=torch.bfloat16)
+            if spk_param.device != dev or spk_param.dtype != model_dtype:
+                self.speaker_encoder.to(device=dev, dtype=model_dtype)
         except StopIteration:
             pass
         # Resample to 24kHz for speaker encoder.
@@ -1132,8 +1138,8 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             fmin=0,
             fmax=12000,
         ).transpose(1, 2)
-        spk = self.speaker_encoder(mels.to(dev, dtype=torch.bfloat16))[0]
-        return spk.to(dtype=torch.bfloat16)
+        spk = self.speaker_encoder(mels.to(dev, dtype=model_dtype))[0]
+        return spk.to(dtype=model_dtype)
 
     def _ensure_speech_tokenizer_loaded(self) -> Qwen3TTSTokenizer:
         if self._speech_tokenizer is not None:
@@ -1147,15 +1153,16 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         if preprocessor_config_path is None:
             raise ValueError(f"{self.model_path}/speech_tokenizer/preprocessor_config.json not found")
         speech_tokenizer_dir = os.path.dirname(speech_tokenizer_path)
+        dev = next(self.parameters()).device
+        model_dtype = self._model_dtype()
         tok = Qwen3TTSTokenizer.from_pretrained(
             speech_tokenizer_dir,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=model_dtype,
         )
         # Only move encoder to GPU; the decoder is unused by Talker (which
-        # only calls tok.encode()) and would otherwise waste bf16 VRAM.
+        # only calls tok.encode()) and would otherwise waste VRAM.
         # NOTE: after this point the tokenizer instance is encode-only;
         # calling tok.decode() will fail because tok.model.decoder is None.
-        dev = next(self.parameters()).device
         if dev.type != "cpu":
             try:
                 del tok.model.decoder
@@ -1432,10 +1439,10 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             if voice_clone_prompt is not None:
                 spk = voice_clone_prompt.get("ref_spk_embedding")
             if isinstance(spk, torch.Tensor):
-                speaker_embed = spk.to(device=input_ids.device, dtype=torch.bfloat16).view(1, 1, -1)
+                speaker_embed = spk.to(device=input_ids.device, dtype=self._model_dtype()).view(1, 1, -1)
             elif isinstance(spk, (list, np.ndarray)):
                 # Plain list/array from API (survived msgspec IPC serialization).
-                speaker_embed = torch.tensor(spk, dtype=torch.bfloat16, device=input_ids.device).view(1, 1, -1)
+                speaker_embed = torch.tensor(spk, dtype=self._model_dtype(), device=input_ids.device).view(1, 1, -1)
             else:
                 ref_audio_list = info_dict.get("ref_audio")
                 if not isinstance(ref_audio_list, list) or not ref_audio_list:
@@ -1689,11 +1696,12 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         bsz = int(input_ids.shape[0])
         q = int(self.talker_config.num_code_groups)
         dev = input_embeds.device
+        model_dtype = self._model_dtype()
 
         input_ids = input_ids.reshape(bsz, 1).to(dtype=torch.long, device=dev)
-        last_id_hidden = input_embeds.reshape(bsz, 1, -1).to(dtype=torch.bfloat16, device=dev)
-        past_hidden = last_talker_hidden.reshape(bsz, 1, -1).to(dtype=torch.bfloat16, device=dev)
-        text_step = text_step.reshape(bsz, 1, -1).to(dtype=torch.bfloat16, device=dev)
+        last_id_hidden = input_embeds.reshape(bsz, 1, -1).to(dtype=model_dtype, device=dev)
+        past_hidden = last_talker_hidden.reshape(bsz, 1, -1).to(dtype=model_dtype, device=dev)
+        text_step = text_step.reshape(bsz, 1, -1).to(dtype=model_dtype, device=dev)
 
         # Residual predictor runs fixed-length (Q-1) steps via the vLLM-native code_predictor.
         max_steps = q - 1
