@@ -28,12 +28,13 @@ newer than 9.11.1, no BF16/FP8, and no FlashAttention-2/SageAttention.
 
 The remaining latency structure is therefore AR/code-predictor time to the
 first codec frame, connector polling (currently 10 ms), first-frame Code2Wav,
-and HTTP chunk delivery. The current processor also creates Python lists at
-each frame (`cpu().tolist()`), reconstructs a nested list window, creates a new
-`torch.long` tensor, then flattens it. Replacing that allocator/CPU-copy chain
-with a bounded contiguous frame buffer is the next structural candidate, but
-it needs a GPU before/after result because it changes connector payload life
-cycles.
+and HTTP chunk delivery. The processor previously created Python integers with
+`cpu().tolist()` for every frame, rebuilt a nested list window, then allocated
+another `torch.long` tensor for every emitted chunk. It now retains compact CPU
+tensors and stacks/transposes the selected window, including reference frames,
+without the nested Python-int round trip. The unavoidable device-to-host copy
+remains one explicit compact copy per frame. A bounded ring buffer is a later
+candidate; it also needs coordinated cleanup and absolute-frame counters.
 
 ## Measured artifact budget
 

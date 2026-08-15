@@ -134,6 +134,17 @@ def _extract_last_frame(pooling_output: OmniPayload) -> torch.Tensor | None:
     raise ValueError(f"Invalid audio_codes shape for Qwen3-TTS async_chunk: {tuple(audio_codes.shape)}")
 
 
+def _stack_codec_frames(frames: list[Any]) -> torch.Tensor:
+    """Stack CPU codec frames without materializing nested Python integers."""
+    tensors = [torch.as_tensor(frame, dtype=torch.long, device="cpu").reshape(-1) for frame in frames]
+    if not tensors:
+        return torch.empty((0, 0), dtype=torch.long)
+    num_quantizers = int(tensors[0].numel())
+    if num_quantizers == 0 or any(int(frame.numel()) != num_quantizers for frame in tensors):
+        raise ValueError("Qwen3-TTS codec frames must have one consistent, non-empty quantizer dimension")
+    return torch.stack(tensors, dim=0)
+
+
 def talker2code2wav_async_chunk(
     transfer_manager: Any,
     pooling_output: OmniPayload | None,
@@ -150,7 +161,10 @@ def talker2code2wav_async_chunk(
     if isinstance(pooling_output, dict):
         frame = _extract_last_frame(pooling_output)
         if frame is not None:
-            codec_codes = frame.cpu().tolist()
+            # Preserve the frame as a compact CPU tensor. The old .tolist()
+            # path allocated one Python integer per quantizer and rebuilt a
+            # nested list into a tensor again for every emitted chunk.
+            codec_codes = frame.detach().reshape(-1).to(device="cpu", dtype=torch.long, copy=True).contiguous()
             transfer_manager.code_prompt_token_ids[request_id].append(codec_codes)
         ref_code = pooling_output.get("codes", {}).get("ref")
         if isinstance(ref_code, torch.Tensor) and ref_code.numel() > 0 and request_payload.get(request_id) is None:
@@ -244,17 +258,25 @@ def talker2code2wav_async_chunk(
     # distorted audio.  Use `.get()` (not `.pop()`) to keep ref_code for
     # subsequent chunks.
     ref_code = request_payload.get(request_id)
+    code_frames = _stack_codec_frames(window_frames)
     if isinstance(ref_code, torch.Tensor) and ref_code.numel() > 0:
-        ref_frames = ref_code.tolist()
-        window_frames = ref_frames + window_frames
-        left_context_size += len(ref_frames)
+        ref_frames = ref_code.detach().to(device="cpu", dtype=torch.long).contiguous()
+        if ref_frames.ndim == 1:
+            num_quantizers = int(code_frames.shape[1])
+            if ref_frames.numel() % num_quantizers != 0:
+                raise ValueError(
+                    f"Qwen3-TTS ref_code has {ref_frames.numel()} values, not divisible by {num_quantizers} quantizers"
+                )
+            ref_frames = ref_frames.reshape(-1, num_quantizers)
+        elif ref_frames.ndim != 2 or int(ref_frames.shape[1]) != int(code_frames.shape[1]):
+            raise ValueError(
+                f"Qwen3-TTS ref_code shape {tuple(ref_frames.shape)} does not match "
+                f"codec frame width {int(code_frames.shape[1])}"
+            )
+        code_frames = torch.cat((ref_frames, code_frames), dim=0)
+        left_context_size += int(ref_frames.shape[0])
 
-    num_quantizers = len(window_frames[0])
-    num_frames = len(window_frames)
-    code_predictor_codes = torch.tensor(
-        [window_frames[f][q] for q in range(num_quantizers) for f in range(num_frames)],
-        dtype=torch.long,
-    )
+    code_predictor_codes = code_frames.transpose(0, 1).contiguous().reshape(-1)
 
     return OmniPayloadStruct(
         codes=CodesStruct(audio=code_predictor_codes),
