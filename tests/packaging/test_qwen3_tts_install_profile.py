@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import yaml
+
 _ROOT = Path(__file__).parents[2]
 
 
@@ -36,3 +38,14 @@ def test_slim_image_bakes_selected_profile_into_wheel_metadata():
 
     assert "VLLM_OMNI_INSTALL_PROFILE=${VLLM_OMNI_INSTALL_PROFILE}" in dockerfile
     assert '"qwen3_tts_12hz": requirements_dir / "qwen3_tts_12hz.txt"' in setup
+
+
+def test_pascal_sized_qwen3_tts_models_are_registered_for_benchmarking():
+    config = yaml.safe_load((_ROOT / "benchmarks/tts/model_configs.yaml").read_text())
+    models = config["models"]
+
+    assert models["Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"]["supported_tasks"] == [
+        "default_voice",
+        "voice_design",
+    ]
+    assert models["Qwen/Qwen3-TTS-12Hz-0.6B-Base"]["supported_tasks"] == ["voice_clone"]

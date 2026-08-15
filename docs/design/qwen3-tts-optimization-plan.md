@@ -145,10 +145,19 @@ Run the exact commands in `PROGRESS.md` on a non-serving Pascal bench gem.
 Accept only if all are true:
 
 1. preflight and CLI import gate pass;
-2. 20-prompt CustomVoice benchmark has no audio-quality regression and reports
-   audio TTFP, E2E, RTF, peak VRAM, average watts, and tokens/audio-second per
-   joule where available;
-3. Base voice-clone smoke proves the FP32 speaker/reference path is finite and
-   non-silent;
+2. matched 20-prompt CustomVoice runs report median audio TTFP, E2E, RTF,
+   throughput, peak VRAM, and average watts; candidate latency/RTF may not exceed
+   baseline by more than 5%, throughput may not fall by more than 5%, and
+   average watts may not rise by more than 5%; claim a speed or efficiency win
+   only when its repeated-run confidence interval excludes zero;
+3. a matched Base voice-clone quality run proves the FP32 speaker/reference path
+   is finite and non-silent; candidate WER may rise by at most 0.5 percentage
+   points, SIM may fall by at most 0.01, and UTMOS may fall by at most 0.05;
 4. image size and `site-packages` audit show measured reductions;
 5. restart/rebuild reproduces the checks—no runtime-only mutation.
+
+The 5% performance/power bands are rollout guardrails, not claimed
+improvements. Use identical prompts, seed, model cache, warmups, concurrency,
+and power-sampling interval for baseline and candidate. Run quality evaluation
+outside the lean runtime image so Whisper/WavLM/UTMOS packages do not become
+serving dependencies.
