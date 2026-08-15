@@ -12,9 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
+
 import base64
 import io
 import urllib.request
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import numpy as np
@@ -26,15 +29,11 @@ from vllm.multimodal.audio import AudioResampler
 from vllm.multimodal.media.audio import load_audio as _load_audio_file
 
 from .tokenizer_12hz.configuration_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Config
-from .tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import (
-    Qwen3TTSTokenizerV2EncoderOutput,
-    Qwen3TTSTokenizerV2Model,
-)
 from .tokenizer_25hz.configuration_qwen3_tts_tokenizer_v1 import Qwen3TTSTokenizerV1Config
-from .tokenizer_25hz.modeling_qwen3_tts_tokenizer_v1 import (
-    Qwen3TTSTokenizerV1EncoderOutput,
-    Qwen3TTSTokenizerV1Model,
-)
+
+if TYPE_CHECKING:
+    from .tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2EncoderOutput
+    from .tokenizer_25hz.modeling_qwen3_tts_tokenizer_v1 import Qwen3TTSTokenizerV1EncoderOutput
 
 AudioInput = (
     str  # wav path, or base64 string
@@ -64,7 +63,7 @@ class Qwen3TTSTokenizer:
         self.device = None
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: str, **kwargs) -> "Qwen3TTSTokenizer":
+    def from_pretrained(cls, pretrained_model_name_or_path: str, **kwargs) -> Qwen3TTSTokenizer:
         """
         Initialize tokenizer with HuggingFace `from_pretrained` style.
 
@@ -84,12 +83,29 @@ class Qwen3TTSTokenizer:
         load_feature_extractor = bool(kwargs.pop("load_feature_extractor", True))
 
         AutoConfig.register("qwen3_tts_tokenizer_12hz", Qwen3TTSTokenizerV2Config)
-        AutoModel.register(Qwen3TTSTokenizerV2Config, Qwen3TTSTokenizerV2Model)
-
         AutoConfig.register("qwen3_tts_tokenizer_25hz", Qwen3TTSTokenizerV1Config)
-        AutoModel.register(Qwen3TTSTokenizerV1Config, Qwen3TTSTokenizerV1Model)
 
-        inst.model = AutoModel.from_pretrained(pretrained_model_name_or_path, **kwargs)
+        # Resolve the lightweight config before importing either model. The
+        # 25 Hz implementation imports onnxruntime and its Whisper/VQ stack;
+        # loading it eagerly made those dependencies and their import cost part
+        # of every 12 Hz Qwen3-TTS process, even when reference audio was never
+        # used. Keep both formats supported, but load only the selected graph.
+        config = kwargs.pop("config", None)
+        if config is None:
+            config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
+
+        if config.model_type == "qwen3_tts_tokenizer_12hz":
+            from .tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Model
+
+            AutoModel.register(Qwen3TTSTokenizerV2Config, Qwen3TTSTokenizerV2Model)
+        elif config.model_type == "qwen3_tts_tokenizer_25hz":
+            from .tokenizer_25hz.modeling_qwen3_tts_tokenizer_v1 import Qwen3TTSTokenizerV1Model
+
+            AutoModel.register(Qwen3TTSTokenizerV1Config, Qwen3TTSTokenizerV1Model)
+        else:
+            raise ValueError(f"Unsupported Qwen3-TTS tokenizer model_type: {config.model_type!r}")
+
+        inst.model = AutoModel.from_pretrained(pretrained_model_name_or_path, config=config, **kwargs)
         inst.config = inst.model.config
 
         inst.feature_extractor = (
