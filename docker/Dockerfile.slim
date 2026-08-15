@@ -1,7 +1,9 @@
 ARG VLLM_BASE_IMAGE=vllm/vllm-openai
 ARG VLLM_BASE_TAG=v0.20.0
+ARG VLLM_OMNI_INSTALL_PROFILE=
 FROM ${VLLM_BASE_IMAGE}:${VLLM_BASE_TAG} AS wheel-builder
 ARG APP_DIR=/workspace/vllm-omni
+ARG VLLM_OMNI_INSTALL_PROFILE
 WORKDIR ${APP_DIR}
 
 COPY . .
@@ -13,12 +15,16 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 ARG SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0
-RUN SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION} \
+RUN VLLM_OMNI_INSTALL_PROFILE=${VLLM_OMNI_INSTALL_PROFILE} \
+    SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION} \
     uv build --wheel --out-dir /wheelhouse
 
 FROM ${VLLM_BASE_IMAGE}:${VLLM_BASE_TAG} AS runtime
 ARG APP_DIR=/workspace/vllm-omni
+ARG VLLM_OMNI_INSTALL_PROFILE
 WORKDIR ${APP_DIR}
+
+LABEL org.opencontainers.image.vllm-omni.install-profile=${VLLM_OMNI_INSTALL_PROFILE}
 
 # libsox is required at runtime for speech formats. Keep compilers, git,
 # repository history, tests, docs, and development extras out of this stage.

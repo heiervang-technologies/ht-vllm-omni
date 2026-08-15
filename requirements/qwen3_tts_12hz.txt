@@ -1,0 +1,12 @@
+# Dedicated Qwen3-TTS 12 Hz serving dependencies on top of vllm-openai.
+#
+# This profile deliberately omits diffusion/video/evaluation stacks, the 25 Hz
+# ONNX Runtime tokenizer, and FA3 (unsupported on Pascal). Keep the default
+# platform requirements for a generic vLLM-Omni wheel.
+omegaconf>=2.3.0
+soundfile>=0.13.1
+einops>=0.8.1
+prettytable>=3.8.0
+aenum==3.1.16
+pyzmq>=25.0.0
+janus>=1.0.0

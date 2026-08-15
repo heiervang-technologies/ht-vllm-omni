@@ -57,6 +57,15 @@ recipe. The exact dev-extra saving must be read from the built image because the
 vLLM base already supplies an unknown subset; do not sum wheel sizes and call it
 an image saving.
 
+For a dedicated 12 Hz artifact, pass
+`--build-arg VLLM_OMNI_INSTALL_PROFILE=qwen3_tts_12hz`. The selected dependency
+profile is baked into wheel metadata and recorded as an OCI image label; an
+unknown profile fails the build. The default remains the full platform-specific
+dependency set. The lean profile deliberately excludes diffusion/video and
+evaluation stacks, the 25 Hz ONNX tokenizer, and Pascal-incompatible FA3. It is
+a candidate until the import, server-start, and speech-quality gates below pass
+inside the actual base image.
+
 ### Serving dependency classification
 
 | Class | Packages/components | Decision |
