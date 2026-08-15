@@ -177,6 +177,24 @@ python benchmarks/asr/measure_qwen3_asr_artifact.py \
   --output benchmarks/asr/results/amber-artifact-rerun.json
 ```
 
+## Disk baseline
+
+Disk is a deployment axis alongside latency, RAM, VRAM, accuracy, and power.
+At 2026-08-15T20:09:44+02:00, `df -h /` reported 475 GiB total, 97 GiB
+used, and 377 GiB available (21% used). The mission workspace was 520 MiB,
+including a 416 MiB CPU-only venv, a 26 MiB fixed audio corpus, and a 2.6 MiB
+wheel artifact directory. The persistent model directory was 23.3 GiB: 19.1
+GiB of GGUF models and 4.2 GiB of Hugging Face layout weights. The uv cache
+was 434 MiB; Docker storage was empty, and Hugging Face, Torch, ModelScope,
+ccache, and Podman caches were absent.
+
+Exact byte counts and the five largest model files are committed in
+`benchmarks/asr/results/amber-20260815-disk-baseline.json`. No model was
+removed: these weights may be shared with other missions, so deletion requires
+dispatcher ownership confirmation. A bench-gem run must capture the same
+filesystem, venv, model-directory, corpus, and artifact measurements before
+and after materializing Qwen3-ASR and its evaluation data.
+
 ## Ready for bench
 
 Prepare the pinned, non-overlapping datasets, then start the fp32 server using
