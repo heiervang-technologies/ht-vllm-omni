@@ -32,3 +32,5 @@ Live base at review: `ht` at `be72432dda44c8b0cf0dbf6f095885723f24e9b5`
 ## VERDICT
 
 **do-not-merge.** Close as obsolete. If any missing FP8 behavior remains after auditing current `ht`, submit one clean PR against current `ht` with an early hardware gate and an explicit `sm_61 -> fail loud / never select FP8` test.
+
+**UPSTREAM: needs-split.** The duplicate, stale branch is not an upstream candidate as-is. Any genuinely missing generic FP8 behavior must be isolated against current upstream code; the sm_61 deployment rejection and dp4a policy are HT-fork concerns.
