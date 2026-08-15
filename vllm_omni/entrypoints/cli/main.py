@@ -6,6 +6,10 @@ import importlib.metadata
 import sys
 
 
+def _first_positional_argument(argv: list[str]) -> str | None:
+    return next((argument for argument in argv[1:] if not argument.startswith("-")), None)
+
+
 def main():
     """Main CLI entry point that intercepts vLLM commands."""
     # Check if --omni flag is present
@@ -26,13 +30,22 @@ def main():
         from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG, cli_env_setup
         from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-        import vllm_omni.entrypoints.cli.benchmark.main
-        import vllm_omni.entrypoints.cli.serve
+        selected_command = _first_positional_argument(sys.argv)
+        command_modules = []
+        if selected_command != "bench":
+            import vllm_omni.entrypoints.cli.serve
 
-        CMD_MODULES = [
-            vllm_omni.entrypoints.cli.serve,
-            vllm_omni.entrypoints.cli.benchmark.main,
-        ]
+            command_modules.append(vllm_omni.entrypoints.cli.serve)
+        if selected_command != "serve":
+            import vllm_omni.entrypoints.cli.benchmark.main
+
+            if selected_command == "bench":
+                # Apply benchmark patches before registering the concrete
+                # benchmark type. Root help only needs the lightweight parent.
+                importlib.import_module("vllm_omni.benchmarks.patch")
+                import vllm_omni.entrypoints.cli.benchmark.serve  # noqa: F401
+
+            command_modules.append(vllm_omni.entrypoints.cli.benchmark.main)
 
         cli_env_setup()
 
@@ -52,7 +65,7 @@ def main():
         )
         subparsers = parser.add_subparsers(required=False, dest="subparser")
         cmds = {}
-        for cmd_module in CMD_MODULES:
+        for cmd_module in command_modules:
             new_cmds = cmd_module.cmd_init()
             for cmd in new_cmds:
                 cmd.subparser_init(subparsers).set_defaults(dispatch_function=cmd.cmd)

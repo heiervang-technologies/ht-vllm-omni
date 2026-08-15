@@ -96,9 +96,12 @@ process import. Separately, the CLI defers `api_server` until after the Pascal
 runtime guard and argument dispatch, and `DiffusionConfig` no longer imports
 `diffusers` just to evaluate a type annotation. Thus `serve --help` avoids the
 HTTP/diffusion serving graph and an incompatible CUDA stack fails before that
-graph is loaded. The bench image must capture `python -X importtime` before and
-after to quantify wall time and RSS, and must verify that normal and headless
-server startup still reach their respective launch paths.
+graph is loaded. CLI command registration is also lazy: `serve` no longer loads
+the benchmark patch/evaluation graph (including its PyDub import), while `bench`
+still explicitly registers its serving benchmark. The bench image must capture
+`python -X importtime` before and after to quantify wall time and RSS, and must
+verify that normal, headless, and benchmark startup still reach their respective
+launch paths.
 
 ## Pascal precision policy
 
