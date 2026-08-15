@@ -6,7 +6,7 @@ commits ahead and zero behind (`24 files`, `+976/-81`).
 
 ## CLAIMS
 
-### Lean 12 Hz dependency profile — UNPROVEN, with a blind gate
+### Lean 12 Hz dependency and disk-size profile — UNPROVEN, with a blind gate
 
 The profile wheel itself is real. I independently built it at low priority and
 confirmed that its seven non-extra requirements are OmegaConf, SoundFile,
@@ -15,6 +15,10 @@ YAML and NPY assets. The multi-stage Dockerfile also keeps the checkout, `.git`,
 tests, docs, and build-only git out of the final stage. With no `.dockerignore`,
 the reported 56,134,435-byte checkout/history-to-wheel logical reduction is
 arithmetically reproducible. It is not a measured image-layer saving.
+It is also not a measured filesystem-space reduction: no before/after
+`docker system df`, image inspect, or host `df` result is committed. The wheel,
+checkout, `.git`, and ONNX payload figures are logical-file measurements and
+must not be relabeled as freed disk bytes.
 
 The dependency-closure claim is not proved by the submitted gates. This branch
 deliberately moves `api_server` behind command dispatch, so
@@ -157,3 +161,11 @@ claims are mostly disciplined, but correct the 0.6B task registry and restore a
 dependency gate that actually imports/starts the deferred serving path in the
 lean image. Do not publish image-size, speed, power, quality, or Pascal-runtime
 claims until the documented P5200 gates produce committed raw results.
+
+**UPSTREAM: needs-split.** The model-dtype cleanup, tensor-native codec window,
+tokenizer/CLI lazy imports, package-data fix, and generic runtime-size audit are
+plausible upstream candidates once their runtime gates pass. The Pascal
+`sm_61`/CUDA/cuDNN policy, fleet-specific artifact narrative, HT Docker
+workflow, and local benchmark rollout gates belong in the public HT fork.
+Separate those concerns before dispatcher/Markus considers any outward
+submission; this review does not authorize one.
