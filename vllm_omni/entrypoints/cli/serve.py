@@ -86,6 +86,13 @@ class OmniServeCommand(CLISubcommand):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
+        # Query capability before model allocation so legacy-GPU deployments
+        # fail with an actionable wheel/cuDNN error instead of a missing-kernel
+        # crash during the first request.
+        from vllm_omni.platforms.cuda.runtime_guard import validate_cuda_runtime
+
+        validate_cuda_runtime()
+
         if not os.environ.get("VLLM_DISABLE_LOG_LOGO"):
             os.environ["VLLM_DISABLE_LOG_LOGO"] = "1"
             log_logo()
