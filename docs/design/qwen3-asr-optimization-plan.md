@@ -147,15 +147,13 @@ truncated WAV. The fork loader now:
 - rejects zero-sample audio;
 - caps declared decoded float32 PCM at 512 MiB by default through
   `VLLM_OMNI_MAX_DECODED_AUDIO_MB`;
-- preserves vLLM's PyAV fallback for non-libsndfile containers;
+- bounds PyAV fallback formats before decode when duration metadata is present
+  and during every decoded frame otherwise;
 - maps failures through the existing request validation boundary.
 
 The committed fuzz cases all reject after the change. The new failure mode is
 intentional: a valid file whose decoded PCM exceeds 512 MiB returns an input
-error and must be sent as bounded chunks instead. PyAV fallback formats are
-checked after decode in this patch; a follow-up should enforce the byte budget
-during frame iteration before exposing arbitrary compressed formats to paid
-traffic.
+error and must be sent as bounded chunks instead.
 
 ## Artifact cut list
 

@@ -125,18 +125,80 @@ def load_audio(
 
     if isinstance(path, io.BytesIO):
         path.seek(0)
-    from vllm.multimodal.media.audio import load_audio_pyav
-
     try:
-        audio, sample_rate = load_audio_pyav(path, sr=sr, mono=mono)
+        audio, sample_rate = _load_audio_pyav_bounded(path, sr=sr, mono=mono)
+    except UnsafeAudioInputError:
+        raise
     except Exception as exc:
         raise ValueError("Invalid or unsupported audio file.") from exc
-    if audio.nbytes > _max_decoded_bytes():
-        raise UnsafeAudioInputError(
-            f"Decoded audio exceeds limit: {audio.nbytes / 1024**2:.1f} MiB > "
-            f"{_max_decoded_bytes() / 1024**2:.0f} MiB"
-        )
     return audio, sample_rate
+
+
+def _load_audio_pyav_bounded(
+    path: io.BytesIO | Path | str,
+    *,
+    sr: float | None,
+    mono: bool,
+) -> tuple[np.ndarray, float]:
+    """Decode PyAV frames while enforcing the expanded-PCM budget."""
+    import av
+
+    max_bytes = _max_decoded_bytes()
+    with av.open(path) as container:
+        if not container.streams.audio:
+            raise ValueError("No audio stream found")
+        stream = container.streams.audio[0]
+        stream.thread_type = "AUTO"
+        native_sr = stream.rate
+        target_sr = int(round(sr or native_sr))
+
+        # PyAV durations use stream.time_base or AV_TIME_BASE microseconds.
+        duration_s: float | None = None
+        if stream.duration is not None and stream.time_base is not None:
+            duration_s = float(stream.duration * stream.time_base)
+        elif container.duration is not None:
+            duration_s = container.duration / 1_000_000
+        target_channels = 1 if mono else max(1, stream.codec_context.channels)
+        if duration_s is not None:
+            declared_bytes = math.ceil(duration_s * target_sr) * target_channels * np.dtype(np.float32).itemsize
+            if declared_bytes > max_bytes:
+                raise UnsafeAudioInputError(
+                    f"Decoded audio exceeds limit: {declared_bytes / 1024**2:.1f} MiB > "
+                    f"{max_bytes / 1024**2:.0f} MiB"
+                )
+
+        # STT always requests mono. Retain upstream behavior for the uncommon
+        # passthrough case while still checking every produced frame.
+        resampler = av.AudioResampler(format="fltp", layout="mono", rate=target_sr) if mono else None
+        chunks: list[np.ndarray] = []
+        decoded_bytes = 0
+
+        def append_frame(frame) -> None:
+            nonlocal decoded_bytes
+            chunk = frame.to_ndarray().astype(np.float32, copy=False)
+            decoded_bytes += chunk.nbytes
+            if decoded_bytes > max_bytes:
+                raise UnsafeAudioInputError(
+                    f"Decoded audio exceeds limit: >{max_bytes / 1024**2:.0f} MiB"
+                )
+            chunks.append(chunk)
+
+        for frame in container.decode(stream):
+            if resampler is None:
+                append_frame(frame)
+            else:
+                for output in resampler.resample(frame):
+                    append_frame(output)
+        if resampler is not None:
+            for output in resampler.resample(None):
+                append_frame(output)
+
+    if not chunks:
+        raise UnsafeAudioInputError("Audio contains no decodable samples")
+    audio = np.concatenate(chunks, axis=-1)
+    if mono:
+        audio = audio.squeeze(0)
+    return audio, target_sr
 
 
 def install_vllm_asr_audio_loader() -> None:

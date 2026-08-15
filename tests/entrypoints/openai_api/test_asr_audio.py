@@ -70,3 +70,11 @@ def test_soundfile_loader_downmixes_stereo() -> None:
         decoded = handle.read(dtype="float32", always_2d=False).T
     assert sample_rate == 16_000
     assert np.array_equal(actual, decoded.mean(axis=0, dtype=np.float32))
+
+
+def test_pyav_fallback_enforces_decoded_limit_during_decode(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _wav_bytes(np.zeros(300_000, dtype=np.float32))
+    monkeypatch.setenv("VLLM_OMNI_MAX_DECODED_AUDIO_MB", "1")
+
+    with pytest.raises(asr_audio.UnsafeAudioInputError, match="Decoded audio exceeds limit"):
+        asr_audio._load_audio_pyav_bounded(io.BytesIO(payload), sr=16_000, mono=True)
