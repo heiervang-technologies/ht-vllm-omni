@@ -72,6 +72,17 @@ jobs:
           docker run --rm --entrypoint python "$FIRST_TAG" \
             -m vllm_omni.entrypoints.cli.main serve --help >/dev/null
 
+      - name: Runtime size audit
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          FIRST_TAG=$(printf '%s\n' "$TAGS" | head -n1)
+          docker image inspect "$FIRST_TAG" --format 'image_bytes={{.Size}}'
+          docker run --rm --entrypoint python \
+            -v "$PWD/tools/runtime_size_audit.py:/runtime_size_audit.py:ro" \
+            "$FIRST_TAG" /runtime_size_audit.py --top 50
+
       - name: Push (CUDA)
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
