@@ -88,6 +88,7 @@ from vllm.utils.system_utils import decorate_logs
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 from vllm_omni.entrypoints.async_omni import AsyncOmni
+from vllm_omni.entrypoints.openai.asr_audio import install_vllm_asr_audio_loader
 from vllm_omni.entrypoints.openai.errors import InvalidInputReferenceError
 from vllm_omni.entrypoints.openai.image_api_utils import (
     SUPPORTED_LAYERED_RESOLUTIONS,
@@ -131,6 +132,11 @@ from vllm_omni.entrypoints.openai.stores import VIDEO_STORE, VIDEO_TASKS
 from vllm_omni.entrypoints.openai.utils import get_stage_type, parse_lora_request
 from vllm_omni.entrypoints.openai.video_api_utils import decode_input_reference
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
+
+# vLLM imports its audio loader into the speech-to-text module namespace.
+# Replace that reference once at process startup so every transcription and
+# translation request uses this fork's measured fast path and safety bounds.
+install_vllm_asr_audio_loader()
 
 logger = init_logger(__name__)
 router = APIRouter()
