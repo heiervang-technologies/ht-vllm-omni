@@ -64,7 +64,7 @@ an image saving.
 | Core | vLLM, torch, torchaudio, transformers, numpy, soundfile, OmegaConf, pyzmq, janus, einops | Keep; imported by engine, audio, pipeline, or connector paths |
 | 12 Hz Qwen3-TTS | Mimi/transformers decoder and SoX format libraries | Keep |
 | 25 Hz only | onnxruntime and Whisper/VQ implementation | Lazy-imported; omit only from a dedicated 12 Hz image |
-| Diffusion-only | diffusers, cache-dit, torchsde, image/video helpers | Candidate omission in a Qwen3-TTS-only recipe; generic Omni image keeps them |
+| Diffusion-only | diffusers, cache-dit, torchsde, image/video helpers | No longer imported solely by `DiffusionConfig` annotations; candidate omission in a Qwen3-TTS-only recipe, while the generic Omni image keeps them |
 | Dev/quality | pytest, datasets, mypy, pre-commit, Whisper evaluation, OpenCV, Mooncake CUDA 13, WER/SIM/UTMOS tools | Never install in runtime |
 | Triton / CUDA Python libraries | supplied transitively by torch/vLLM base | Do not delete blindly: Triton cannot generate useful Pascal kernels, but vLLM imports may still require the package |
 | FA3/FlashAttention/SageAttention | unsupported on `sm_61` | Omit from Pascal recipe; use PyTorch SDPA math/memory-efficient paths |
@@ -80,18 +80,16 @@ while the project requires `<3.14`, and no serving environment is installed.
 The measured attempt exited in 0.048 s at the first missing dependency
 (`aenum`). This is recorded as **could not measure**, not as a 48 ms cold start.
 
-One verified import-graph cut is implemented: importing the Qwen3-TTS tokenizer
-wrapper no longer imports both the 12 Hz and 25 Hz model graphs. It reads the
-lightweight config first and imports only the selected implementation. This
-keeps `onnxruntime` and the 25 Hz Whisper/VQ graph out of a 12 Hz process import.
-The bench image must capture `python -X importtime` before and after to quantify
-wall time and RSS.
-
-The entrypoint itself still imports `api_server` at module scope through
-`cli.serve`; that pulls FastAPI, serving implementations, diffusion detection,
-and vLLM server code before argument dispatch. Moving `omni_run_server` into
-`OmniServeCommand.cmd` is a later cold-start candidate, gated by CLI/help and
-forkserver tests.
+Two verified import-graph cuts are implemented. The Qwen3-TTS tokenizer wrapper
+reads the lightweight config first and imports only the selected 12 Hz or 25 Hz
+implementation, keeping `onnxruntime` and the Whisper/VQ graph out of a 12 Hz
+process import. Separately, the CLI defers `api_server` until after the Pascal
+runtime guard and argument dispatch, and `DiffusionConfig` no longer imports
+`diffusers` just to evaluate a type annotation. Thus `serve --help` avoids the
+HTTP/diffusion serving graph and an incompatible CUDA stack fails before that
+graph is loaded. The bench image must capture `python -X importtime` before and
+after to quantify wall time and RSS, and must verify that normal and headless
+server startup still reach their respective launch paths.
 
 ## Pascal precision policy
 
