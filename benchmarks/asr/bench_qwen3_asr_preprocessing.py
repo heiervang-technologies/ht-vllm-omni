@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import io
 import json
 import math
@@ -49,6 +50,19 @@ CORPUS = (
     AudioCase("clip_48k_stereo", 30, 48_000, 2),
     AudioCase("long_44k_stereo", 120, 44_100, 2),
 )
+
+
+def _load_asr_audio_module():
+    module_path = Path(__file__).parents[2] / "vllm_omni/entrypoints/openai/asr_audio.py"
+    spec = importlib.util.spec_from_file_location("_bench_asr_audio", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+ASR_AUDIO = _load_asr_audio_module()
 
 
 def _pcm_block(case: AudioCase, start: int, count: int) -> np.ndarray:
@@ -142,6 +156,10 @@ def _pad_hop(audio: np.ndarray) -> np.ndarray:
     return audio if remainder == 0 else np.pad(audio, (0, HOP_LENGTH - remainder))
 
 
+def _downmix_fast(audio: np.ndarray) -> np.ndarray:
+    return ASR_AUDIO.downmix_audio(audio)
+
+
 def _feature_extractor() -> WhisperFeatureExtractor:
     # Qwen/Qwen3-ASR-1.7B preprocessor_config.json, pinned explicitly so the
     # benchmark never needs model weights or a network request.
@@ -176,10 +194,12 @@ def benchmark_case(path: Path, duration_s: int, repeats: int) -> dict[str, Any]:
     timings: dict[str, list[float]] = {
         "decode": [],
         "downmix": [],
+        "downmix_fast": [],
         "resample": [],
         "hop_pad": [],
         "feature_extract": [],
         "cpu_total": [],
+        "cpu_total_fast_downmix": [],
         "fused_decode_resample": [],
     }
     sizes: dict[str, int] = {}
@@ -190,7 +210,9 @@ def benchmark_case(path: Path, duration_s: int, repeats: int) -> dict[str, Any]:
         decoded = time.perf_counter_ns()
         mono = native.mean(axis=0, dtype=np.float32) if native.ndim > 1 else native
         downmixed = time.perf_counter_ns()
-        resampled = _resample_pyav(mono, sample_rate, TARGET_SAMPLE_RATE)
+        fast_mono = _downmix_fast(native)
+        fast_downmixed = time.perf_counter_ns()
+        resampled = _resample_pyav(fast_mono, sample_rate, TARGET_SAMPLE_RATE)
         resample_done = time.perf_counter_ns()
         padded = _pad_hop(resampled)
         pad_done = time.perf_counter_ns()
@@ -213,6 +235,8 @@ def benchmark_case(path: Path, duration_s: int, repeats: int) -> dict[str, Any]:
             # not silently change duration or gross sample values.
             if abs(len(fused) - len(resampled)) > 1:
                 raise RuntimeError(f"fused length mismatch: {len(fused)} != {len(resampled)}")
+            if not np.array_equal(mono, fast_mono):
+                raise RuntimeError("fast downmix changed float32 samples")
             sizes = {
                 "request_bytes": len(payload),
                 "decoded_native_bytes": native.nbytes,
@@ -221,11 +245,22 @@ def benchmark_case(path: Path, duration_s: int, repeats: int) -> dict[str, Any]:
             }
             continue
 
-        points = (started, decoded, downmixed, resample_done, pad_done, feature_done)
-        names = ("decode", "downmix", "resample", "hop_pad", "feature_extract")
-        for name, left, right in zip(names, points[:-1], points[1:], strict=True):
-            timings[name].append((right - left) / 1e6)
-        timings["cpu_total"].append((feature_done - started) / 1e6)
+        decode_ms = (decoded - started) / 1e6
+        downmix_ms = (downmixed - decoded) / 1e6
+        fast_downmix_ms = (fast_downmixed - downmixed) / 1e6
+        resample_ms = (resample_done - fast_downmixed) / 1e6
+        pad_ms = (pad_done - resample_done) / 1e6
+        feature_ms = (feature_done - pad_done) / 1e6
+        timings["decode"].append(decode_ms)
+        timings["downmix"].append(downmix_ms)
+        timings["downmix_fast"].append(fast_downmix_ms)
+        timings["resample"].append(resample_ms)
+        timings["hop_pad"].append(pad_ms)
+        timings["feature_extract"].append(feature_ms)
+        timings["cpu_total"].append(decode_ms + downmix_ms + resample_ms + pad_ms + feature_ms)
+        timings["cpu_total_fast_downmix"].append(
+            decode_ms + fast_downmix_ms + resample_ms + pad_ms + feature_ms
+        )
         timings["fused_decode_resample"].append((fused_done - fused_started) / 1e6)
 
     return {
@@ -261,19 +296,22 @@ def _hostile_inputs(valid_wav: bytes) -> dict[str, bytes]:
     }
 
 
-def _decode_worker(payload: bytes, queue: mp.Queue) -> None:
+def _decode_worker(payload: bytes, queue: mp.Queue, optimized: bool) -> None:
     started = time.perf_counter_ns()
     try:
-        native, sample_rate = _decode_soundfile(payload)
-        mono = native.mean(axis=0, dtype=np.float32) if native.ndim > 1 else native
-        _resample_pyav(mono, sample_rate, TARGET_SAMPLE_RATE)
+        if optimized:
+            ASR_AUDIO.load_audio_soundfile(io.BytesIO(payload), sr=None, mono=True)
+        else:
+            native, sample_rate = _decode_soundfile(payload)
+            mono = native.mean(axis=0, dtype=np.float32) if native.ndim > 1 else native
+            _resample_pyav(mono, sample_rate, TARGET_SAMPLE_RATE)
     except Exception as exc:  # noqa: BLE001 - exception class is fuzz output
         queue.put(("rejected", type(exc).__name__, (time.perf_counter_ns() - started) / 1e6))
     else:
         queue.put(("accepted", None, (time.perf_counter_ns() - started) / 1e6))
 
 
-def fuzz_ingest(valid_wav: bytes, timeout_s: float) -> dict[str, Any]:
+def fuzz_ingest(valid_wav: bytes, timeout_s: float, *, optimized: bool) -> dict[str, Any]:
     results: dict[str, Any] = {}
     # ``fork`` keeps process-start/import time out of the malformed-file
     # deadline on Linux. Fall back to spawn for platforms without it.
@@ -281,7 +319,7 @@ def fuzz_ingest(valid_wav: bytes, timeout_s: float) -> dict[str, Any]:
     context = mp.get_context(start_method)
     for name, payload in _hostile_inputs(valid_wav).items():
         queue = context.Queue()
-        process = context.Process(target=_decode_worker, args=(payload, queue))
+        process = context.Process(target=_decode_worker, args=(payload, queue, optimized))
         started = time.perf_counter_ns()
         process.start()
         process.join(timeout_s)
@@ -339,7 +377,12 @@ def main() -> None:
         },
         "corpus": manifest,
         "cases": results,
-        "hostile_inputs": fuzz_ingest(Path(manifest[0]["path"]).read_bytes(), args.hostile_timeout_s),
+        "hostile_inputs_baseline": fuzz_ingest(
+            Path(manifest[0]["path"]).read_bytes(), args.hostile_timeout_s, optimized=False
+        ),
+        "hostile_inputs_optimized": fuzz_ingest(
+            Path(manifest[0]["path"]).read_bytes(), args.hostile_timeout_s, optimized=True
+        ),
         "process_max_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
         "gpu_stages": {
             "encoder": "could-not-measure: live worker owns amber GPU",
