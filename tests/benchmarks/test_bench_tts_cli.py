@@ -51,6 +51,16 @@ def test_load_model_configs(model_configs_path: Path) -> None:
     assert configs["test/ModelA"]["supported_tasks"] == ["voice_clone", "default_voice"]
 
 
+def test_builtin_configs_include_qwen3_tts_06b_variants() -> None:
+    configs = bench_tts.load_model_configs(bench_tts._DEFAULT_MODEL_CONFIGS)
+
+    assert configs["Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"]["supported_tasks"] == [
+        "default_voice",
+        "voice_design",
+    ]
+    assert configs["Qwen/Qwen3-TTS-12Hz-0.6B-Base"]["supported_tasks"] == ["voice_clone"]
+
+
 def test_build_bench_args_voice_clone(model_configs_path: Path) -> None:
     configs = bench_tts.load_model_configs(model_configs_path)
     cmd = bench_tts.build_bench_args(

@@ -12,6 +12,7 @@ from vllm_omni.model_executor.stage_input_processors.chunk_size_utils import (
     max_ic_for_chunk_size,
 )
 from vllm_omni.model_executor.stage_input_processors.qwen3_tts import (
+    _stack_codec_frames,
     talker2code2wav,
     talker2code2wav_async_chunk,
 )
@@ -60,6 +61,29 @@ def _call(tm, rid, *, n_frames, finished=False, req_ic=None):
         request=_req(rid, finished=finished, initial_codec_chunk_frames=req_ic),
         is_finished=finished,
     )
+
+
+def test_stack_codec_frames_accepts_legacy_lists_and_tensor_frames():
+    frames = [_FRAME, torch.tensor([5, 6, 7, 8], dtype=torch.int32)]
+
+    stacked = _stack_codec_frames(frames)
+
+    assert stacked.dtype == torch.long
+    assert stacked.tolist() == [_FRAME, [5, 6, 7, 8]]
+
+
+def test_async_chunk_keeps_new_frames_as_compact_cpu_tensors():
+    tm = _tm(initial_chunk_frames=1)
+    pooling_output = {"codes": {"audio": torch.tensor([[9, 9, 9, 9], _FRAME])}}
+
+    talker2code2wav_async_chunk(tm, pooling_output, _req("r", finished=False))
+
+    stored = tm.code_prompt_token_ids["r"][0]
+    assert isinstance(stored, torch.Tensor)
+    assert stored.device.type == "cpu"
+    assert stored.dtype == torch.long
+    assert stored.tolist() == _FRAME
+    assert stored.untyped_storage().nbytes() == stored.numel() * stored.element_size()
 
 
 def test_empty_returns_none():

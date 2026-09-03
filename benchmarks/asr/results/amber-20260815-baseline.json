@@ -1,0 +1,219 @@
+{
+  "cases": {
+    "clip_48k_stereo": {
+      "duration_s": 30,
+      "sizes": {
+        "decoded_native_bytes": 11520000,
+        "feature_bytes": 1536000,
+        "request_bytes": 5760044,
+        "resampled_bytes": 1920000
+      },
+      "stages": {
+        "cpu_total": {
+          "p50_ms": 81.3894,
+          "p50_ms_per_audio_s": 2.71298,
+          "p95_ms": 82.772
+        },
+        "decode": {
+          "p50_ms": 7.3678,
+          "p50_ms_per_audio_s": 0.245592,
+          "p95_ms": 7.4054
+        },
+        "downmix": {
+          "p50_ms": 22.6573,
+          "p50_ms_per_audio_s": 0.755243,
+          "p95_ms": 22.7206
+        },
+        "feature_extract": {
+          "p50_ms": 43.957,
+          "p50_ms_per_audio_s": 1.465234,
+          "p95_ms": 44.8362
+        },
+        "fused_decode_resample": {
+          "p50_ms": 87.5244,
+          "p50_ms_per_audio_s": 2.917479,
+          "p95_ms": 87.9113
+        },
+        "hop_pad": {
+          "p50_ms": 0.0035,
+          "p50_ms_per_audio_s": 0.000116,
+          "p95_ms": 0.0044
+        },
+        "resample": {
+          "p50_ms": 7.3557,
+          "p50_ms_per_audio_s": 0.245191,
+          "p95_ms": 8.7957
+        }
+      }
+    },
+    "long_44k_stereo": {
+      "duration_s": 120,
+      "sizes": {
+        "decoded_native_bytes": 42336000,
+        "feature_bytes": 6144000,
+        "request_bytes": 21168044,
+        "resampled_bytes": 7680000
+      },
+      "stages": {
+        "cpu_total": {
+          "p50_ms": 334.5917,
+          "p50_ms_per_audio_s": 2.788264,
+          "p95_ms": 347.256
+        },
+        "decode": {
+          "p50_ms": 26.6773,
+          "p50_ms_per_audio_s": 0.22231,
+          "p95_ms": 29.086
+        },
+        "downmix": {
+          "p50_ms": 79.9154,
+          "p50_ms_per_audio_s": 0.665962,
+          "p95_ms": 80.1657
+        },
+        "feature_extract": {
+          "p50_ms": 172.7667,
+          "p50_ms_per_audio_s": 1.439723,
+          "p95_ms": 182.8763
+        },
+        "fused_decode_resample": {
+          "p50_ms": 134.054,
+          "p50_ms_per_audio_s": 1.117117,
+          "p95_ms": 134.8443
+        },
+        "hop_pad": {
+          "p50_ms": 0.0041,
+          "p50_ms_per_audio_s": 3.4e-05,
+          "p95_ms": 0.6592
+        },
+        "resample": {
+          "p50_ms": 55.139,
+          "p50_ms_per_audio_s": 0.459492,
+          "p95_ms": 58.0865
+        }
+      }
+    },
+    "short_16k_mono": {
+      "duration_s": 5,
+      "sizes": {
+        "decoded_native_bytes": 320000,
+        "feature_bytes": 256000,
+        "request_bytes": 160044,
+        "resampled_bytes": 320000
+      },
+      "stages": {
+        "cpu_total": {
+          "p50_ms": 11.5725,
+          "p50_ms_per_audio_s": 2.314496,
+          "p95_ms": 12.0841
+        },
+        "decode": {
+          "p50_ms": 0.4954,
+          "p50_ms_per_audio_s": 0.099086,
+          "p95_ms": 0.5034
+        },
+        "downmix": {
+          "p50_ms": 0.0005,
+          "p50_ms_per_audio_s": 0.000106,
+          "p95_ms": 0.0008
+        },
+        "feature_extract": {
+          "p50_ms": 11.0766,
+          "p50_ms_per_audio_s": 2.215319,
+          "p95_ms": 11.5763
+        },
+        "fused_decode_resample": {
+          "p50_ms": 16.4547,
+          "p50_ms_per_audio_s": 3.290949,
+          "p95_ms": 20.5891
+        },
+        "hop_pad": {
+          "p50_ms": 0.0021,
+          "p50_ms_per_audio_s": 0.00041,
+          "p95_ms": 0.0028
+        },
+        "resample": {
+          "p50_ms": 0.0007,
+          "p50_ms_per_audio_s": 0.000136,
+          "p95_ms": 0.0009
+        }
+      }
+    }
+  },
+  "corpus": [
+    {
+      "bytes": 160044,
+      "channels": 1,
+      "duration_s": 5,
+      "name": "short_16k_mono",
+      "path": "<HOME>/work/asr-bench-corpus/short_16k_mono.wav",
+      "sample_rate": 16000,
+      "sha256": "02c081db77b55698a4be6476aa2a18fae36c1588a3ac224cfd262446a9876b46"
+    },
+    {
+      "bytes": 5760044,
+      "channels": 2,
+      "duration_s": 30,
+      "name": "clip_48k_stereo",
+      "path": "<HOME>/work/asr-bench-corpus/clip_48k_stereo.wav",
+      "sample_rate": 48000,
+      "sha256": "a0a710ccbf0584e4a2d73c90a5187b680ea01b6e3fdd2d1689cca7479c866d09"
+    },
+    {
+      "bytes": 21168044,
+      "channels": 2,
+      "duration_s": 120,
+      "name": "long_44k_stereo",
+      "path": "<HOME>/work/asr-bench-corpus/long_44k_stereo.wav",
+      "sample_rate": 44100,
+      "sha256": "d6b7c4bef7ae608bb23eb83e7053aa29e3b59f16282a12ae56426af9d7a82ee2"
+    }
+  ],
+  "environment": {
+    "hostname": "amber",
+    "nice": 10,
+    "numpy": "2.3.2",
+    "platform": "Linux-7.0.9-arch2-1-x86_64-with-glibc2.43",
+    "pyav": "15.1.0",
+    "python": "3.12.13 (main, May 10 2026, 19:30:01) [Clang 22.1.3 ]",
+    "soundfile": "0.13.1",
+    "transformers": "4.57.3"
+  },
+  "gpu_stages": {
+    "decode": "could-not-measure: live worker owns amber GPU",
+    "encoder": "could-not-measure: live worker owns amber GPU"
+  },
+  "hostile_inputs": {
+    "empty": {
+      "decode_ms": 0.2737,
+      "error": "LibsndfileError",
+      "status": "rejected",
+      "wall_ms": 8.2508
+    },
+    "lying_wav_header": {
+      "decode_ms": 0.5142,
+      "error": null,
+      "status": "accepted",
+      "wall_ms": 7.0483
+    },
+    "random_4k": {
+      "decode_ms": 0.2845,
+      "error": "LibsndfileError",
+      "status": "rejected",
+      "wall_ms": 6.9901
+    },
+    "riff_only": {
+      "decode_ms": 0.3377,
+      "error": "LibsndfileError",
+      "status": "rejected",
+      "wall_ms": 6.9027
+    },
+    "truncated_valid_wav": {
+      "decode_ms": 0.6227,
+      "error": null,
+      "status": "accepted",
+      "wall_ms": 7.0514
+    }
+  },
+  "process_max_rss_kib": 435708,
+  "schema_version": 1
+}
