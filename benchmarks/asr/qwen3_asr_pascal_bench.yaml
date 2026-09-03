@@ -1,0 +1,80 @@
+schema_version: 1
+model:
+  id: Qwen/Qwen3-ASR-1.7B
+  revision: 7278e1e70fe206f11671096ffdd38061171dd6e5
+  target_sample_rate: 16000
+  checkpoint_dtype: bfloat16
+  baseline_dtype: float32
+
+datasets:
+  english_smoke:
+    id: hf-internal-testing/librispeech_asr_dummy
+    revision: 5be91486e11a2d616f4ec5db8d3fd248585ac07a
+    split: validation
+    selection: all_sorted_by_id
+  multilingual:
+    id: google/fleurs
+    revision: 70bb2e84b976b7e960aa89f1c648e09c59f894dd
+    languages: [en_us, nb_no, de_de, cmn_hans_cn]
+    calibration:
+      split: train
+      selection: first_32_sorted_by_id
+    evaluation:
+      split: validation
+      selection: first_100_sorted_by_id
+
+request_matrix:
+  chunk_seconds: [2.5, 5, 10, 30]
+  concurrency: [1, 2, 4, 8]
+  max_num_seqs: [1, 2, 4, 8]
+  audio_mix:
+    - {duration_seconds: 5, weight: 50}
+    - {duration_seconds: 30, weight: 35}
+    - {duration_seconds: 120, weight: 15, upload_mode: 30s_chunks}
+  stop_limits:
+    process_rss_gib: 12
+    gpu_memory_used_gib: 14.5
+    request_error_rate_percent: 0
+
+quantization:
+  baseline: fp32_honest_fallback
+  candidates:
+    - name: onnxruntime_static_int8_qdq
+      calibration: multilingual
+      include:
+        - audio_tower.conv_out
+        - audio_tower.layers.*.self_attn.qkv
+        - audio_tower.layers.*.self_attn.out_proj
+        - audio_tower.layers.*.fc1
+        - audio_tower.layers.*.fc2
+        - audio_tower.proj1
+        - audio_tower.proj2
+      exclude:
+        - audio_tower.conv2d*
+        - audio_tower.*layer_norm*
+        - audio_tower.ln_post
+        - attention_softmax
+    - name: torchao_int8_weight_only_probe
+      disposition: reject_unless_profiler_confirms_dp4a_and_speedup
+      note: Weight-only dequantization is not assumed to use Pascal dp4a.
+  reject:
+    - vllm_omni_diffusion_int8
+    - bf16
+    - fp8
+  rejection_reasons:
+    vllm_omni_diffusion_int8: get_min_capability_is_80
+    bf16: unsupported_on_sm61
+    fp8: unsupported_on_sm61
+    fp16: rejected_for_bf16_trained_checkpoint_due_to_corruption_risk
+
+acceptance:
+  overall_wer_absolute_regression_max: 0.5
+  per_language_wer_absolute_regression_max: 1.0
+  encoder_latency_improvement_min_percent: 20
+  output_text_must_be_finite_and_nonempty: true
+  malformed_input_p95_rejection_ms_max: 100
+
+power_sampling:
+  interval_ms: 100
+  metrics: [power.draw, memory.used, utilization.gpu]
+  report: [audio_seconds_per_joule, output_tokens_per_joule, joules_per_request]
