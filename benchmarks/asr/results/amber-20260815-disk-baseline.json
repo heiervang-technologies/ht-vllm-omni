@@ -1,0 +1,44 @@
+{
+  "captured_at": "2026-08-15T20:09:44+02:00",
+  "host": "amber",
+  "root_filesystem": {
+    "source": "/dev/nvme0n1p2",
+    "mount": "/",
+    "size_bytes": 509961637888,
+    "used_bytes": 104021868544,
+    "available_bytes": 404625145856,
+    "use_percent": 21,
+    "df_h": "/dev/nvme0n1p2  475G   97G  377G  21% /"
+  },
+  "directories": {
+    "<HOME>/work": 545143948,
+    "<HOME>/work/.venv-asr": 436427907,
+    "<HOME>/work/ht-vllm-omni": 75842378,
+    "<HOME>/work/vllm-v0.20-source": 3119199,
+    "<HOME>/work/asr-bench-corpus": 27088132,
+    "<HOME>/work/asr-artifacts": 2626389,
+    "<HOME>/Models": 25034888423,
+    "<HOME>/Models/gguf": 20514669472,
+    "<HOME>/Models/vllm-omni-hf": 4520218951,
+    "<HOME>/.cache/uv": 454787300,
+    "/var/lib/docker": 0
+  },
+  "largest_model_files": {
+    "<HOME>/Models/gguf/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf": 13211155424,
+    "<HOME>/Models/gguf/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf": 6716355328,
+    "<HOME>/Models/vllm-omni-hf/Qwen3-TTS-12Hz-1.7B-CustomVoice/model.safetensors": 3833402552,
+    "<HOME>/Models/gguf/gemma-4-12B-it-qat-assistant-MTP-Q8_0.gguf": 465127040,
+    "<HOME>/Models/gguf/gemma-4-12b-it-mmproj-F16.gguf": 122031680
+  },
+  "missing_expected_caches": [
+    "<HOME>/.cache/huggingface",
+    "<HOME>/.cache/modelscope",
+    "<HOME>/.cache/torch/hub",
+    "<HOME>/.cache/ccache",
+    "/var/lib/containers"
+  ],
+  "notes": [
+    "Directory byte counts are from du -sb; root filesystem bytes are from df -B1 /.",
+    "No files were removed. The model files may be shared by other missions and are not cleanup candidates without dispatcher ownership confirmation."
+  ]
+}

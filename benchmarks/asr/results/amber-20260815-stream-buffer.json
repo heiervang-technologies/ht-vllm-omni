@@ -1,0 +1,115 @@
+{
+  "environment": {
+    "hostname": "amber",
+    "nice": 10,
+    "numpy": "2.3.2",
+    "platform": "Linux-7.0.9-arch2-1-x86_64-with-glibc2.43",
+    "python": "3.12.13"
+  },
+  "idle_preallocation_bytes": {
+    "candidate_ring": 320000,
+    "upstream_shift": 3840000
+  },
+  "schema_version": 1,
+  "workloads": {
+    "burst_10min_single_write": {
+      "candidate_ring": {
+        "p50_ms": 87.0869,
+        "samples_ms": [
+          87.3884,
+          86.7238,
+          87.0869,
+          86.8311,
+          86.3521,
+          86.9649,
+          87.2464,
+          87.0977,
+          87.2675
+        ]
+      },
+      "duration_s": 600,
+      "p50_change_percent": -67.15,
+      "upstream_shift": {
+        "p50_ms": 265.0837,
+        "samples_ms": [
+          264.3815,
+          265.9349,
+          262.2833,
+          265.0837,
+          264.1602,
+          266.1076,
+          262.3128,
+          266.2652,
+          282.3143
+        ]
+      },
+      "write_samples": 9600000
+    },
+    "burst_60s_single_write": {
+      "candidate_ring": {
+        "p50_ms": 8.2076,
+        "samples_ms": [
+          8.2076,
+          8.1478,
+          8.2447,
+          8.4459,
+          8.2068,
+          8.1513,
+          8.1405,
+          8.4107,
+          8.3484
+        ]
+      },
+      "duration_s": 60,
+      "p50_change_percent": -6.62,
+      "upstream_shift": {
+        "p50_ms": 8.7893,
+        "samples_ms": [
+          8.8032,
+          8.7568,
+          8.9978,
+          8.7893,
+          8.7642,
+          8.7552,
+          9.0878,
+          8.7963,
+          8.762
+        ]
+      },
+      "write_samples": 960000
+    },
+    "realtime_10min_20ms_writes": {
+      "candidate_ring": {
+        "p50_ms": 119.9203,
+        "samples_ms": [
+          124.1092,
+          119.0921,
+          122.5323,
+          119.5313,
+          119.2932,
+          121.8545,
+          119.9203,
+          119.2183,
+          121.6178
+        ]
+      },
+      "duration_s": 600,
+      "p50_change_percent": 19.83,
+      "upstream_shift": {
+        "p50_ms": 100.0734,
+        "samples_ms": [
+          98.4822,
+          100.0975,
+          99.0548,
+          100.7034,
+          100.476,
+          100.0734,
+          100.6574,
+          99.3667,
+          99.9176
+        ]
+      },
+      "write_samples": 320
+    }
+  }
+}

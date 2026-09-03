@@ -10,6 +10,7 @@ from vllm.platforms.cuda import CudaPlatformBase
 from vllm.platforms.interface import DeviceCapability
 
 from vllm_omni.diffusion.attention.backends.registry import DiffusionAttentionBackendEnum
+from vllm_omni.platforms.cuda.pascal_guard import validate_pascal_runtime
 from vllm_omni.platforms.interface import OmniPlatform, OmniPlatformEnum
 
 logger = init_logger(__name__)
@@ -23,6 +24,26 @@ class CudaOmniPlatform(OmniPlatform, CudaPlatformBase):
     """
 
     _omni_enum = OmniPlatformEnum.CUDA
+
+    @classmethod
+    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        super().check_and_update_config(vllm_config)
+        capability = cls.get_device_capability()
+        if capability is None:
+            return
+        model_config = vllm_config.model_config
+        dtype = getattr(model_config, "dtype", None) if model_config is not None else None
+        hf_config = getattr(model_config, "hf_config", None) if model_config is not None else None
+        checkpoint_dtype = getattr(hf_config, "dtype", None)
+        thinker_config = getattr(hf_config, "thinker_config", None)
+        checkpoint_dtype = checkpoint_dtype or getattr(thinker_config, "dtype", None)
+        validate_pascal_runtime(
+            device_capability=(capability.major, capability.minor),
+            cuda_version=torch.version.cuda,
+            compiled_arches=torch.cuda.get_arch_list(),
+            dtype_name=str(dtype) if dtype is not None else None,
+            checkpoint_dtype_name=str(checkpoint_dtype) if checkpoint_dtype is not None else None,
+        )
 
     @classmethod
     def get_omni_ar_worker_cls(cls) -> str:

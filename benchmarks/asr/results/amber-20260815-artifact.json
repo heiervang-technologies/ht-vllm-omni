@@ -1,0 +1,36 @@
+{
+  "buckets": {
+    "diffusion": {
+      "compressed_bytes": 947525,
+      "files": 254,
+      "uncompressed_bytes": 4116202
+    },
+    "non_qwen3_model_plugins": {
+      "compressed_bytes": 806760,
+      "files": 139,
+      "uncompressed_bytes": 2491253
+    },
+    "qwen3_omni": {
+      "compressed_bytes": 41193,
+      "files": 8,
+      "uncompressed_bytes": 175088
+    },
+    "qwen3_tts": {
+      "compressed_bytes": 77184,
+      "files": 18,
+      "uncompressed_bytes": 318032
+    }
+  },
+  "conservative_asr_cut": {
+    "compressed_bytes": 1754285,
+    "note": "Code only; dependency and model-weight savings must be measured by ruby's image-slimming work.",
+    "percent_of_wheel": 66.79
+  },
+  "schema_version": 1,
+  "wheel": {
+    "bytes": 2626388,
+    "files": 672,
+    "name": "vllm_omni-13.dev499+ga7156dcdd.d20260815-py3-none-any.whl",
+    "uncompressed_bytes": 9515300
+  }
+}
