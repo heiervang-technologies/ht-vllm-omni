@@ -1,6 +1,8 @@
 # adapted from sglang and fastvideo
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import copy
 import os
 import random
@@ -8,7 +10,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any
 
-import diffusers
 import torch
 from PIL import Image
 from pydantic import model_validator
@@ -24,6 +25,7 @@ from vllm_omni.diffusion.utils.network_utils import is_port_available
 from vllm_omni.quantization import build_quant_config
 
 if TYPE_CHECKING:
+    import diffusers
     from vllm.config import ProfilerConfig
 
 # Import after TYPE_CHECKING to avoid circular imports at runtime
@@ -176,7 +178,7 @@ class DiffusionParallelConfig:
             self.world_size = other_parallel_world_size
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DiffusionParallelConfig":
+    def from_dict(cls, data: dict[str, Any]) -> DiffusionParallelConfig:
         """
         Create DiffusionParallelConfig from a dictionary.
 
@@ -197,10 +199,10 @@ class TransformerConfig:
 
     params: dict[str, Any] = field(default_factory=dict)
     quant_method: str | None = None
-    quant_config: "QuantizationConfig | None" = None
+    quant_config: QuantizationConfig | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "TransformerConfig":
+    def from_dict(cls, data: dict[str, Any]) -> TransformerConfig:
         if not isinstance(data, dict):
             raise TypeError(f"Expected transformer config dict, got {type(data)!r}")
         params = dict(data)  # copy to avoid mutating caller's dict
@@ -308,7 +310,7 @@ class DiffusionCacheConfig:
     _extra_params: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DiffusionCacheConfig":
+    def from_dict(cls, data: dict[str, Any]) -> DiffusionCacheConfig:
         """
         Create DiffusionCacheConfig from a dictionary.
 
@@ -367,7 +369,7 @@ class OmniDiffusionConfig:
     tf_model_config: TransformerConfig = field(default_factory=TransformerConfig)
 
     # Attention
-    diffusion_attention_config: "AttentionConfig" = field(default_factory=lambda: AttentionConfig())
+    diffusion_attention_config: AttentionConfig = field(default_factory=lambda: AttentionConfig())
 
     # Running mode
     # mode: ExecutionMode = ExecutionMode.INFERENCE
@@ -505,7 +507,7 @@ class OmniDiffusionConfig:
     # Omni configuration (injected from stage config)
     omni_kv_config: dict[str, Any] = field(default_factory=dict)
 
-    profiler_config: "ProfilerConfig | dict[str, Any] | None" = None
+    profiler_config: ProfilerConfig | dict[str, Any] | None = None
 
     # Model-specific function for collecting CFG KV caches (set at runtime)
     cfg_kv_collect_func: Any | None = None
@@ -668,7 +670,7 @@ class OmniDiffusionConfig:
                 "valid together with diffusion_load_format=diffusers"
             )
 
-    def _propagate_quantization_from_tf_config(self, tf_config: "TransformerConfig") -> None:
+    def _propagate_quantization_from_tf_config(self, tf_config: TransformerConfig) -> None:
         if tf_config.quant_config is None:
             return
 
@@ -694,7 +696,7 @@ class OmniDiffusionConfig:
             return quant_config.get_name() == "fp8"
         return False
 
-    def set_tf_model_config(self, tf_config: "TransformerConfig") -> None:
+    def set_tf_model_config(self, tf_config: TransformerConfig) -> None:
         """Assign `tf_model_config` and propagate quantization if detected.
 
         In the normal startup flow `OmniDiffusionConfig` is created
@@ -786,7 +788,7 @@ class OmniDiffusionConfig:
                     raise
 
     @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> "OmniDiffusionConfig":
+    def from_kwargs(cls, **kwargs: Any) -> OmniDiffusionConfig:
         # Backwards-compatibility: older callers may use a diffusion-specific
         # "static_lora_scale" kwarg. Normalize it to the canonical "lora_scale"
         # before constructing the dataclass to avoid TypeError on unknown fields.
