@@ -258,9 +258,7 @@ def benchmark_case(path: Path, duration_s: int, repeats: int) -> dict[str, Any]:
         timings["hop_pad"].append(pad_ms)
         timings["feature_extract"].append(feature_ms)
         timings["cpu_total"].append(decode_ms + downmix_ms + resample_ms + pad_ms + feature_ms)
-        timings["cpu_total_fast_downmix"].append(
-            decode_ms + fast_downmix_ms + resample_ms + pad_ms + feature_ms
-        )
+        timings["cpu_total_fast_downmix"].append(decode_ms + fast_downmix_ms + resample_ms + pad_ms + feature_ms)
         timings["fused_decode_resample"].append((fused_done - fused_started) / 1e6)
 
     return {

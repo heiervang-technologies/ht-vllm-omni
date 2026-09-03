@@ -163,8 +163,7 @@ def _load_audio_pyav_bounded(
             declared_bytes = math.ceil(duration_s * target_sr) * target_channels * np.dtype(np.float32).itemsize
             if declared_bytes > max_bytes:
                 raise UnsafeAudioInputError(
-                    f"Decoded audio exceeds limit: {declared_bytes / 1024**2:.1f} MiB > "
-                    f"{max_bytes / 1024**2:.0f} MiB"
+                    f"Decoded audio exceeds limit: {declared_bytes / 1024**2:.1f} MiB > {max_bytes / 1024**2:.0f} MiB"
                 )
 
         # STT always requests mono. Retain upstream behavior for the uncommon
@@ -178,9 +177,7 @@ def _load_audio_pyav_bounded(
             chunk = frame.to_ndarray().astype(np.float32, copy=False)
             decoded_bytes += chunk.nbytes
             if decoded_bytes > max_bytes:
-                raise UnsafeAudioInputError(
-                    f"Decoded audio exceeds limit: >{max_bytes / 1024**2:.0f} MiB"
-                )
+                raise UnsafeAudioInputError(f"Decoded audio exceeds limit: >{max_bytes / 1024**2:.0f} MiB")
             chunks.append(chunk)
 
         for frame in container.decode(stream):

@@ -150,7 +150,8 @@ class Qwen3TTSCode2Wav(nn.Module):
                     if n > q * 12:
                         logger.warning(
                             "Code2Wav skip: input_ids length %d not divisible by num_quantizers %d. "
-                            "This skip has persisted past the first second of output and may indicate a broken sequence.",
+                            "This skip has persisted past the first second of output and may indicate "
+                            "a broken sequence.",
                             n,
                             q,
                         )
