@@ -104,7 +104,7 @@ include = ["vllm_omni*"]
 
 [tool.setuptools.package-data]
 "vllm_omni" = ["_version.py", "py.typed"]
-"vllm_omni.model_executor.stage_configs" = ["*.yaml"]
+"*" = ["*.yaml", "*.npy", "*.npz"]
 
 [tool.setuptools_scm]
 # no extra settings needed, presence enables setuptools-scm

@@ -21,7 +21,6 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from vllm_omni.engine.arg_utils import nullify_stage_engine_defaults
 from vllm_omni.entrypoints.cli.logo import log_logo
-from vllm_omni.entrypoints.openai.api_server import omni_run_server
 
 logger = init_logger(__name__)
 
@@ -86,6 +85,13 @@ class OmniServeCommand(CLISubcommand):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
+        # Query capability before model allocation so legacy-GPU deployments
+        # fail with an actionable wheel/cuDNN error instead of a missing-kernel
+        # crash during the first request.
+        from vllm_omni.platforms.cuda.runtime_guard import validate_cuda_runtime
+
+        validate_cuda_runtime()
+
         if not os.environ.get("VLLM_DISABLE_LOG_LOGO"):
             os.environ["VLLM_DISABLE_LOG_LOGO"] = "1"
             log_logo()
@@ -97,6 +103,10 @@ class OmniServeCommand(CLISubcommand):
         if args.headless:
             run_headless(args)
         else:
+            # Keep the heavyweight HTTP and diffusion serving graph behind the
+            # CUDA preflight and out of argument parsing / ``serve --help``.
+            from vllm_omni.entrypoints.openai.api_server import omni_run_server
+
             uvloop.run(omni_run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:

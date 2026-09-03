@@ -213,22 +213,38 @@ def load_requirements(file_path: Path) -> list[str]:
 
 def get_install_requires() -> list[str]:
     """
-    Get the list of dependencies based on detected platform.
+    Get the dependency list for an explicit serving profile or the detected
+    platform.
 
     Returns:
-        List of requirement strings for the detected platform
+        List of requirement strings for the selected install target.
     """
-    device = detect_target_device()
     requirements_dir = Path(__file__).parent / "requirements"
-    requirements_file = requirements_dir / f"{device}.txt"
+    install_profile = os.environ.get("VLLM_OMNI_INSTALL_PROFILE")
+    if install_profile:
+        profiles = {
+            "qwen3_tts_12hz": requirements_dir / "qwen3_tts_12hz.txt",
+        }
+        if install_profile not in profiles:
+            supported = ", ".join(sorted(profiles))
+            raise RuntimeError(
+                f"Unknown VLLM_OMNI_INSTALL_PROFILE {install_profile!r}; "
+                f"supported profiles: {supported}"
+            )
+        requirements_file = profiles[install_profile]
+        target = f"install profile {install_profile}"
+    else:
+        device = detect_target_device()
+        requirements_file = requirements_dir / f"{device}.txt"
+        target = f"device {device}"
 
     print(f"Loading requirements from: {requirements_file}")
     requirements = load_requirements(requirements_file)
 
     if not requirements:
-        print(f"Warning: No requirements loaded for device '{device}'")
+        print(f"Warning: No requirements loaded for {target}")
     else:
-        print(f"Loaded {len(requirements)} requirements for {device}")
+        print(f"Loaded {len(requirements)} requirements for {target}")
 
     return requirements
 

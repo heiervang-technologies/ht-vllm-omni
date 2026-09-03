@@ -1,21 +1,41 @@
 ARG VLLM_BASE_IMAGE=vllm/vllm-openai
 ARG VLLM_BASE_TAG=v0.20.0
-FROM ${VLLM_BASE_IMAGE}:${VLLM_BASE_TAG}
+ARG VLLM_OMNI_INSTALL_PROFILE=
+FROM ${VLLM_BASE_IMAGE}:${VLLM_BASE_TAG} AS wheel-builder
 ARG APP_DIR=/workspace/vllm-omni
+ARG VLLM_OMNI_INSTALL_PROFILE
 WORKDIR ${APP_DIR}
 
 COPY . .
 
-# Install system deps (git needed for setuptools-scm, libsox-fmt-all for audio)
+# git is build-only: setuptools-scm needs it while creating the wheel.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git libsox-fmt-all && \
+    apt-get install -y --no-install-recommends git && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install vllm-omni (SETUPTOOLS_SCM_PRETEND_VERSION avoids git tag lookup)
 ARG SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0
-RUN SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION} \
-    uv pip install --system --no-cache-dir ".[dev]"
+RUN VLLM_OMNI_INSTALL_PROFILE=${VLLM_OMNI_INSTALL_PROFILE} \
+    SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION} \
+    uv build --wheel --out-dir /wheelhouse
+
+FROM ${VLLM_BASE_IMAGE}:${VLLM_BASE_TAG} AS runtime
+ARG APP_DIR=/workspace/vllm-omni
+ARG VLLM_OMNI_INSTALL_PROFILE
+WORKDIR ${APP_DIR}
+
+LABEL org.opencontainers.image.vllm-omni.install-profile=${VLLM_OMNI_INSTALL_PROFILE}
+
+# libsox is required at runtime for speech formats. Keep compilers, git,
+# repository history, tests, docs, and development extras out of this stage.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libsox-fmt-all && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=wheel-builder /wheelhouse /wheelhouse
+RUN uv pip install --system --no-cache-dir /wheelhouse/*.whl && \
+    rm -rf /wheelhouse
 
 RUN ln -sf /usr/bin/python3 /usr/bin/python
 
