@@ -10,6 +10,27 @@ models:
   # -CustomVoice checkpoints lack speaker_encoder weights, so voice_clone is
   # NOT supported (an attempt raises ValueError from _extract_speaker_embedding
   # at model runtime).  Use -Base for voice_clone.
+  Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice:
+    supported_tasks: [default_voice, voice_design]
+    backend: openai-audio-speech
+    endpoint: /v1/audio/speech
+    task_extra_body:
+      default_voice:
+        voice: Vivian
+        language: English
+        task_type: CustomVoice
+      voice_design:
+        task_type: VoiceDesign
+        language: English
+
+  Qwen/Qwen3-TTS-12Hz-0.6B-Base:
+    supported_tasks: [voice_clone]
+    backend: openai-audio-speech
+    endpoint: /v1/audio/speech
+    task_extra_body:
+      voice_clone:
+        task_type: Base
+
   Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice:
     supported_tasks: [default_voice, voice_design]
     backend: openai-audio-speech
