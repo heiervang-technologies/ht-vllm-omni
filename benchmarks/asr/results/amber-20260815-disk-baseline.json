@@ -11,30 +11,30 @@
     "df_h": "/dev/nvme0n1p2  475G   97G  377G  21% /"
   },
   "directories": {
-    "/home/me/work": 545143948,
-    "/home/me/work/.venv-asr": 436427907,
-    "/home/me/work/ht-vllm-omni": 75842378,
-    "/home/me/work/vllm-v0.20-source": 3119199,
-    "/home/me/work/asr-bench-corpus": 27088132,
-    "/home/me/work/asr-artifacts": 2626389,
-    "/home/me/Models": 25034888423,
-    "/home/me/Models/gguf": 20514669472,
-    "/home/me/Models/vllm-omni-hf": 4520218951,
-    "/home/me/.cache/uv": 454787300,
+    "<HOME>/work": 545143948,
+    "<HOME>/work/.venv-asr": 436427907,
+    "<HOME>/work/ht-vllm-omni": 75842378,
+    "<HOME>/work/vllm-v0.20-source": 3119199,
+    "<HOME>/work/asr-bench-corpus": 27088132,
+    "<HOME>/work/asr-artifacts": 2626389,
+    "<HOME>/Models": 25034888423,
+    "<HOME>/Models/gguf": 20514669472,
+    "<HOME>/Models/vllm-omni-hf": 4520218951,
+    "<HOME>/.cache/uv": 454787300,
     "/var/lib/docker": 0
   },
   "largest_model_files": {
-    "/home/me/Models/gguf/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf": 13211155424,
-    "/home/me/Models/gguf/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf": 6716355328,
-    "/home/me/Models/vllm-omni-hf/Qwen3-TTS-12Hz-1.7B-CustomVoice/model.safetensors": 3833402552,
-    "/home/me/Models/gguf/gemma-4-12B-it-qat-assistant-MTP-Q8_0.gguf": 465127040,
-    "/home/me/Models/gguf/gemma-4-12b-it-mmproj-F16.gguf": 122031680
+    "<HOME>/Models/gguf/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf": 13211155424,
+    "<HOME>/Models/gguf/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf": 6716355328,
+    "<HOME>/Models/vllm-omni-hf/Qwen3-TTS-12Hz-1.7B-CustomVoice/model.safetensors": 3833402552,
+    "<HOME>/Models/gguf/gemma-4-12B-it-qat-assistant-MTP-Q8_0.gguf": 465127040,
+    "<HOME>/Models/gguf/gemma-4-12b-it-mmproj-F16.gguf": 122031680
   },
   "missing_expected_caches": [
-    "/home/me/.cache/huggingface",
-    "/home/me/.cache/modelscope",
-    "/home/me/.cache/torch/hub",
-    "/home/me/.cache/ccache",
+    "<HOME>/.cache/huggingface",
+    "<HOME>/.cache/modelscope",
+    "<HOME>/.cache/torch/hub",
+    "<HOME>/.cache/ccache",
     "/var/lib/containers"
   ],
   "notes": [

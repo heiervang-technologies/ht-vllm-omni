@@ -175,7 +175,7 @@
       "channels": 1,
       "duration_s": 5,
       "name": "short_16k_mono",
-      "path": "/home/me/work/asr-bench-corpus/short_16k_mono.wav",
+      "path": "<HOME>/work/asr-bench-corpus/short_16k_mono.wav",
       "sample_rate": 16000,
       "sha256": "02c081db77b55698a4be6476aa2a18fae36c1588a3ac224cfd262446a9876b46"
     },
@@ -184,7 +184,7 @@
       "channels": 2,
       "duration_s": 30,
       "name": "clip_48k_stereo",
-      "path": "/home/me/work/asr-bench-corpus/clip_48k_stereo.wav",
+      "path": "<HOME>/work/asr-bench-corpus/clip_48k_stereo.wav",
       "sample_rate": 48000,
       "sha256": "a0a710ccbf0584e4a2d73c90a5187b680ea01b6e3fdd2d1689cca7479c866d09"
     },
@@ -193,7 +193,7 @@
       "channels": 2,
       "duration_s": 120,
       "name": "long_44k_stereo",
-      "path": "/home/me/work/asr-bench-corpus/long_44k_stereo.wav",
+      "path": "<HOME>/work/asr-bench-corpus/long_44k_stereo.wav",
       "sample_rate": 44100,
       "sha256": "d6b7c4bef7ae608bb23eb83e7053aa29e3b59f16282a12ae56426af9d7a82ee2"
     }
