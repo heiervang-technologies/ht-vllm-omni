@@ -37,6 +37,12 @@ from .qwen3_tts_tokenizer import Qwen3TTSTokenizer
 
 logger = init_logger(__name__)
 
+# Default speaker-steering horizon when the request gives no
+# speaker_steering_frames: codec frames per input text token (12Hz codec;
+# measured ~4.0-4.4 on English with the 1.7B Base model).
+_STEERING_FRAMES_PER_TEXT_TOKEN = 4.0
+_STEERING_MIN_FRAMES = 12
+
 
 # ---------------------------------------------------------------------------
 # Components ported from the HuggingFace Qwen3-TTS reference implementation.
@@ -422,6 +428,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             ("hidden_states", "last"),
             ("embed", "tts_pad"),
             ("hidden_states", "trailing_text"),
+            ("embed", "steering_delta"),
         }
 
         # Tokenizer for prompt building.
@@ -611,6 +618,11 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                     info_update.setdefault("codes", {})["ref"] = ref_code.detach().to("cpu").contiguous()
                 if ref_code_len is not None:
                     info_update["meta"]["ref_code_len"] = int(ref_code_len)
+                steering_delta = info_dict.get("_steering_delta")
+                if isinstance(steering_delta, torch.Tensor):
+                    info_update["embed"]["steering_delta"] = steering_delta.detach()
+                    info_update["meta"]["steering_step"] = 0
+                    info_update["meta"]["steering_frames"] = int(info_dict["_steering_frames"])
                 # Always return a span_len slice; if the scheduled placeholder is longer, pad with tts_pad_embed.
                 # This preserves placeholder/embedding alignment.
                 offset = 0
@@ -681,10 +693,24 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         )
         inputs_embeds_out = last_id_hidden.reshape(1, -1)
 
+        meta_update: dict[str, Any] = {"codec_streaming": codec_streaming}
+        # HT: dynamic speaker steering. The start speaker sits in the (already
+        # cached) prompt, so we steer by adding a linearly ramped
+        # (end - start) delta to each decode step's talker input. It is added
+        # to text_step rather than inputs_embeds_out so the code predictor's
+        # layer-0 embedding is left untouched.
+        steering_delta = embed.get("steering_delta")
+        if isinstance(steering_delta, torch.Tensor):
+            steering_step = int(meta.get("steering_step", 0) or 0)
+            steering_frames = max(int(meta.get("steering_frames", 1) or 1), 1)
+            ramp = min(steering_step / steering_frames, 1.0)
+            text_step = text_step + ramp * steering_delta.to(device=input_ids.device, dtype=model_dtype).reshape(1, -1)
+            meta_update["steering_step"] = steering_step + 1
+
         info_update = {
             "hidden_states": {"trailing_text": new_tail},
             "mtp_inputs": (past_hidden, text_step),
-            "meta": {"codec_streaming": codec_streaming},
+            "meta": meta_update,
         }
         return input_ids, inputs_embeds_out, info_update
 
@@ -1651,6 +1677,10 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         if instruct_embed is not None:
             talker_prompt = torch.cat([instruct_embed, talker_prompt], dim=1)
 
+        if speaker_embed is not None:
+            # input_ids = 3 role-header tokens + text + 5 trailing template tokens.
+            self._prepare_speaker_steering(info_dict, speaker_embed, num_text_tokens=int(input_ids.shape[1]) - 8)
+
         return (
             talker_prompt.squeeze(0),  # [prompt_len, H]
             trailing_text_hidden.squeeze(0),  # [T, H]
@@ -1658,6 +1688,38 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             ref_code_len,
             ref_code_prompt.contiguous() if isinstance(ref_code_prompt, torch.Tensor) else None,
         )
+
+    def _prepare_speaker_steering(
+        self,
+        info_dict: dict[str, Any],
+        speaker_embed: torch.Tensor,
+        *,
+        num_text_tokens: int,
+    ) -> None:
+        """Stash the steering delta in ``info_dict`` for preprocess() to persist.
+
+        The speaker embedding enters the prompt as ``tts_pad + speaker_embed``, so
+        the delta between end and start speakers in prompt space is simply
+        ``end - start``.
+        """
+        end_raw = info_dict.get("speaker_embedding_end")
+        if isinstance(end_raw, list) and end_raw and isinstance(end_raw[0], (list, tuple, np.ndarray, torch.Tensor)):
+            end_raw = end_raw[0]
+        if end_raw is None or (isinstance(end_raw, (list, tuple)) and not end_raw):
+            return
+        end = torch.as_tensor(end_raw, dtype=speaker_embed.dtype, device=speaker_embed.device).reshape(-1)
+        start = speaker_embed.reshape(-1)
+        if end.shape != start.shape:
+            raise ValueError(
+                f"speaker_embedding_end has {end.numel()} dimensions; expected {start.numel()} for this model"
+            )
+        frames = info_dict.get("speaker_steering_frames")
+        if isinstance(frames, list):
+            frames = frames[0] if frames else None
+        if not isinstance(frames, int) or frames < 1:
+            frames = max(int(num_text_tokens * _STEERING_FRAMES_PER_TEXT_TOKEN), _STEERING_MIN_FRAMES)
+        info_dict["_steering_delta"] = (end - start).contiguous()
+        info_dict["_steering_frames"] = frames
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Consume talker weights, and conditionally consume speaker encoder

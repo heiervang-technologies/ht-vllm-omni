@@ -41,6 +41,7 @@ class Embeddings(TypedDict, total=False):
     speech_feat: torch.Tensor
     speech_token: torch.Tensor
     embedding: torch.Tensor
+    steering_delta: torch.Tensor
     thinker_reply: torch.Tensor
 
 
@@ -77,6 +78,8 @@ class OmniPayloadMeta(TypedDict, total=False):
     codec_streaming: bool
     ref_code_len: int
     talker_prefill_offset: int
+    steering_step: int
+    steering_frames: int
 
 
 class OmniPayload(TypedDict, total=False):
@@ -124,6 +127,7 @@ class EmbeddingsStruct(_StructBase):
     speech_feat: torch.Tensor | None = None
     speech_token: torch.Tensor | None = None
     embedding: torch.Tensor | None = None
+    steering_delta: torch.Tensor | None = None
     thinker_reply: torch.Tensor | None = None
 
 
@@ -160,6 +164,8 @@ class MetaStruct(_StructBase):
     codec_streaming: bool | None = None
     ref_code_len: int | None = None
     talker_prefill_offset: int | None = None
+    steering_step: int | None = None
+    steering_frames: int | None = None
     codec_chunk_frames: int | None = None
     codec_left_context_frames: int | None = None
     code_flat_numel: int | None = None
