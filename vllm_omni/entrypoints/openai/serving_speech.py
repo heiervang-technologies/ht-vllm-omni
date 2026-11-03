@@ -101,6 +101,19 @@ _TTS_MAX_INSTRUCTIONS_LENGTH = 500
 _TTS_MAX_NEW_TOKENS_MIN = 1
 _TTS_MAX_NEW_TOKENS_MAX = 4096
 
+# Qwen3-TTS Base can rarely enter a codec loop in which EOS falls out of the
+# top-k set, so generation runs to the stage max_tokens (4096 frames, ~5.5 min
+# of babble). Port of upstream vllm-omni #6728: bound requests without an
+# explicit max_new_tokens to max(192, 12 * input text tokens) codec frames.
+# Upstream measured the worst valid Base output at >=1.57x below this bound
+# (0 of 10,528 Seed-TTS generations truncated).
+_QWEN3_TTS_BASE_MIN_CODEC_FRAMES = 192
+_QWEN3_TTS_BASE_CODEC_FRAMES_PER_TEXT_TOKEN = 12
+
+
+class _Qwen3CodecBudgetExhausted(Exception):
+    """A non-streaming Qwen3-TTS generation ran to its codec budget without EOS."""
+
 
 def _create_wav_header(sample_rate: int, num_channels: int = 1, bits_per_sample: int = 16) -> bytes:
     """Create a WAV header with placeholder size values for streaming.
@@ -361,6 +374,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         self._build_voxtral_prompt_async = make_async(self._build_voxtral_prompt, executor=self._tts_executor)
         self._build_fish_speech_prompt_async = make_async(self._build_fish_speech_prompt, executor=self._tts_executor)
         self._estimate_prompt_len_async = make_async(self._estimate_prompt_len, executor=self._tts_executor)
+        # Shares the single-worker executor so tokenizer access stays serialized.
+        self._count_tts_text_tokens_async = make_async(self._count_tts_text_tokens, executor=self._tts_executor)
+        # request_id -> automatic Qwen3-TTS Base codec budget (see
+        # _apply_qwen3_tts_codec_budget); popped by the audio consumers.
+        self._qwen3_auto_codec_caps: dict[str, int] = {}
 
     async def warmup(self) -> None:
         """Run a synthetic speech request to trigger all first-request warmup.
@@ -1585,6 +1603,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         prev_count = 0
         sample_rate_val = 24000
         first_chunk = True
+        codec_cap = self._qwen3_auto_codec_caps.pop(request_id, None)
+        emitted_samples = 0
 
         try:
             async for res in generator:
@@ -1616,6 +1636,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     )
                     if chunk_np.ndim > 1:
                         chunk_np = chunk_np.squeeze()
+                    emitted_samples += int(chunk_np.size)
                     # For WAV format, emit header before first audio chunk
                     if response_format == "wav" and first_chunk:
                         # Assert that sample rate has been set from chunk metadata (not just default)
@@ -1637,6 +1658,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                         base64_encode=False,
                     )
                     yield self.create_audio(audio_obj).audio_data
+            # Already-streamed audio cannot be retracted; the codec budget has
+            # bounded the runaway, so record it and end the stream as before.
+            self._qwen3_codec_budget_exhausted(request_id, codec_cap, emitted_samples, sample_rate_val)
         except asyncio.CancelledError:
             logger.info("Streaming request %s cancelled by client", request_id)
             raise
@@ -2070,6 +2094,82 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
     # ---- Common speech generation helpers ----
 
+    def _count_tts_text_tokens(self, text: str) -> int | None:
+        """Count input text tokens with the Qwen3-TTS tokenizer (best effort)."""
+        tokenizer = self._tts_tokenizer
+        if tokenizer is None or not text:
+            return None
+        try:
+            return len(tokenizer(text, padding=False)["input_ids"])
+        except Exception as e:
+            logger.warning("Failed to count TTS text tokens: %s", e)
+            return None
+
+    async def _apply_qwen3_tts_codec_budget(
+        self,
+        request: OpenAICreateSpeechRequest,
+        tts_params: dict[str, Any],
+        sampling_params_list: list,
+        request_id: str,
+    ) -> list:
+        """Bound Qwen3-TTS Base codec generation by input text length.
+
+        An explicit max_new_tokens is the caller's opt-out. If the text cannot
+        be tokenized the configured stage limit is kept rather than truncating
+        at the floor.
+        """
+        if (
+            self._tts_model_type != "qwen3_tts"
+            or request.max_new_tokens is not None
+            or not sampling_params_list
+            or (tts_params.get("task_type") or [None])[0] != "Base"
+        ):
+            return sampling_params_list
+        text_tokens = await self._count_tts_text_tokens_async(request.input)
+        if not text_tokens:
+            return sampling_params_list
+        import copy
+
+        configured_cap = getattr(sampling_params_list[0], "max_tokens", None)
+        cap = max(_QWEN3_TTS_BASE_MIN_CODEC_FRAMES, _QWEN3_TTS_BASE_CODEC_FRAMES_PER_TEXT_TOKEN * text_tokens)
+        if configured_cap is not None:
+            cap = min(cap, int(configured_cap))
+        sampling_params_list = list(sampling_params_list)
+        sampling_params_list[0] = copy.copy(sampling_params_list[0])
+        sampling_params_list[0].max_tokens = cap
+        if sampling_params_list[0].extra_args is not None:
+            # A shallow copy shares extra_args; a later per-request seed must
+            # not leak into the stage defaults.
+            sampling_params_list[0].extra_args = dict(sampling_params_list[0].extra_args)
+        if len(self._qwen3_auto_codec_caps) >= 256:
+            # Entries of streams the client never started are never popped.
+            self._qwen3_auto_codec_caps.pop(next(iter(self._qwen3_auto_codec_caps)))
+        self._qwen3_auto_codec_caps[request_id] = cap
+        logger.debug("Qwen3-TTS request %s: %d text tokens -> codec budget %d", request_id, text_tokens, cap)
+        return sampling_params_list
+
+    def _qwen3_codec_budget_exhausted(self, request_id: str, cap: int | None, num_samples: int, sample_rate: int) -> bool:
+        """True when a budgeted generation ran to its cap instead of codec EOS.
+
+        A length finish at max_tokens=N decodes N-1 codec frames (measured on
+        the deployed build), while an EOS finish decodes fewer. The only
+        overlap is EOS sampled in the very last slot, which at worst costs a
+        harmless retry.
+        """
+        if cap is None or self._codec_frame_rate is None or sample_rate <= 0:
+            return False
+        frames = num_samples * self._codec_frame_rate / sample_rate
+        if frames < cap - 1.5:
+            return False
+        logger.warning(
+            "Qwen3-TTS request %s exhausted its codec budget without EOS (%.0f/%d frames); "
+            "the audio is a runaway generation",
+            request_id,
+            frames,
+            cap,
+        )
+        return True
+
     async def _prepare_speech_generation(
         self,
         request: OpenAICreateSpeechRequest,
@@ -2276,6 +2376,10 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     request.max_new_tokens,
                 )
 
+        sampling_params_list = await self._apply_qwen3_tts_codec_budget(
+            request, tts_params, sampling_params_list, request_id
+        )
+
         if request.seed is not None and sampling_params_list:
             if sampling_params_list is self.engine_client.default_sampling_params_list:
                 import copy
@@ -2317,6 +2421,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         request_id: str | None = None,
     ) -> tuple[bytes | str, str]:
         request_id, generator, _ = await self._prepare_speech_generation(request, request_id=request_id)
+        codec_cap = self._qwen3_auto_codec_caps.pop(request_id, None)
 
         # MOSS-TTS-Nano emits delta chunks per yield (single-stage,
         # async_chunk=false). The engine surfaces each yield as its own
@@ -2401,6 +2506,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         if audio_tensor.ndim > 1:
             audio_tensor = audio_tensor.squeeze()
+
+        if self._qwen3_codec_budget_exhausted(request_id, codec_cap, int(audio_tensor.size), int(sample_rate)):
+            raise _Qwen3CodecBudgetExhausted(request_id)
 
         audio_obj = CreateAudio(
             audio_tensor=audio_tensor,
@@ -2648,7 +2756,29 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     media_type=media_type,
                 )
 
-            audio_bytes, media_type = await self._generate_audio_bytes(request, request_id=request_id)
+            try:
+                audio_bytes, media_type = await self._generate_audio_bytes(request, request_id=request_id)
+            except _Qwen3CodecBudgetExhausted:
+                # Upstream #6728: discard the runaway and retry once with a
+                # fresh seed. An explicit seed is a reproducibility contract,
+                # so it gets the error instead.
+                if request.seed is not None:
+                    raise ValueError(
+                        "Qwen3-TTS did not emit codec EOS before its token budget; the audio is incomplete."
+                    ) from None
+                retry_seed = int(random_uuid()[:8], 16)
+                retry_request_id = f"speech-{random_uuid()}"
+                logger.warning(
+                    "TTS request %s ran away; retrying once as %s with seed=%d", request_id, retry_request_id, retry_seed
+                )
+                try:
+                    audio_bytes, media_type = await self._generate_audio_bytes(
+                        request.model_copy(update={"seed": retry_seed}), request_id=retry_request_id
+                    )
+                except _Qwen3CodecBudgetExhausted:
+                    raise ValueError(
+                        "Qwen3-TTS did not emit codec EOS before its token budget on retry; the audio is incomplete."
+                    ) from None
             return Response(content=audio_bytes, media_type=media_type)
 
         except asyncio.CancelledError:
