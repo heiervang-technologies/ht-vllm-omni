@@ -111,7 +111,7 @@ _QWEN3_TTS_BASE_MIN_CODEC_FRAMES = 192
 _QWEN3_TTS_BASE_CODEC_FRAMES_PER_TEXT_TOKEN = 12
 
 
-class _Qwen3CodecBudgetExhausted(Exception):
+class _Qwen3CodecBudgetExhaustedError(Exception):
     """A non-streaming Qwen3-TTS generation ran to its codec budget without EOS."""
 
 
@@ -2148,7 +2148,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         logger.debug("Qwen3-TTS request %s: %d text tokens -> codec budget %d", request_id, text_tokens, cap)
         return sampling_params_list
 
-    def _qwen3_codec_budget_exhausted(self, request_id: str, cap: int | None, num_samples: int, sample_rate: int) -> bool:
+    def _qwen3_codec_budget_exhausted(
+        self, request_id: str, cap: int | None, num_samples: int, sample_rate: int
+    ) -> bool:
         """True when a budgeted generation ran to its cap instead of codec EOS.
 
         A length finish at max_tokens=N decodes N-1 codec frames (measured on
@@ -2508,7 +2510,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             audio_tensor = audio_tensor.squeeze()
 
         if self._qwen3_codec_budget_exhausted(request_id, codec_cap, int(audio_tensor.size), int(sample_rate)):
-            raise _Qwen3CodecBudgetExhausted(request_id)
+            raise _Qwen3CodecBudgetExhaustedError(request_id)
 
         audio_obj = CreateAudio(
             audio_tensor=audio_tensor,
@@ -2758,7 +2760,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
             try:
                 audio_bytes, media_type = await self._generate_audio_bytes(request, request_id=request_id)
-            except _Qwen3CodecBudgetExhausted:
+            except _Qwen3CodecBudgetExhaustedError:
                 # Upstream #6728: discard the runaway and retry once with a
                 # fresh seed. An explicit seed is a reproducibility contract,
                 # so it gets the error instead.
@@ -2769,13 +2771,16 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 retry_seed = int(random_uuid()[:8], 16)
                 retry_request_id = f"speech-{random_uuid()}"
                 logger.warning(
-                    "TTS request %s ran away; retrying once as %s with seed=%d", request_id, retry_request_id, retry_seed
+                    "TTS request %s ran away; retrying once as %s with seed=%d",
+                    request_id,
+                    retry_request_id,
+                    retry_seed,
                 )
                 try:
                     audio_bytes, media_type = await self._generate_audio_bytes(
                         request.model_copy(update={"seed": retry_seed}), request_id=retry_request_id
                     )
-                except _Qwen3CodecBudgetExhausted:
+                except _Qwen3CodecBudgetExhaustedError:
                     raise ValueError(
                         "Qwen3-TTS did not emit codec EOS before its token budget on retry; the audio is incomplete."
                     ) from None
