@@ -976,6 +976,65 @@ class TestTTSMethods:
         params = speech_server._build_tts_params(req)
         assert "voice_clone_prompt" not in params
 
+    # ── speaker steering (speaker_embedding_end) ──
+
+    def test_speaker_embedding_end_dim_mismatch_rejected(self, speech_server):
+        """Start and end embeddings must share a dimension (pydantic validation)."""
+        with pytest.raises(ValueError, match="same dimension"):
+            OpenAICreateSpeechRequest(
+                input="Hello", task_type="Base", speaker_embedding=[0.1] * 1024, speaker_embedding_end=[0.2] * 2048
+            )
+
+    def test_speaker_embedding_end_nan_rejected(self, speech_server):
+        with pytest.raises(ValueError, match="speaker_embedding_end"):
+            OpenAICreateSpeechRequest(
+                input="Hello", task_type="Base", speaker_embedding=[0.1] * 4, speaker_embedding_end=[float("nan")] * 4
+            )
+
+    def test_speaker_steering_frames_requires_end(self, speech_server):
+        with pytest.raises(ValueError, match="requires 'speaker_embedding_end'"):
+            OpenAICreateSpeechRequest(
+                input="Hello", task_type="Base", speaker_embedding=[0.1] * 4, speaker_steering_frames=24
+            )
+
+    def test_speaker_embedding_end_rejected_for_voice_design(self, speech_server):
+        req = OpenAICreateSpeechRequest(
+            input="Hello", task_type="VoiceDesign", instructions="warm", speaker_embedding_end=[0.1] * 1024
+        )
+        assert "VoiceDesign" in speech_server._validate_tts_request(req)
+
+    def test_speaker_embedding_end_wrong_dims_rejected(self, speech_server):
+        speech_server._tts_model_type = "qwen3_tts"
+        speech_server.engine_client.model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(talker_config=SimpleNamespace(hidden_size=2048))
+        )
+        req = OpenAICreateSpeechRequest(
+            input="Hello", task_type="Base", ref_audio="data:audio/wav;base64,abc", speaker_embedding_end=[0.1] * 1024
+        )
+        req.x_vector_only_mode = True
+        result = speech_server._validate_tts_request(req)
+        assert "speaker_embedding_end has 1024 dimensions" in result
+
+    def test_build_tts_params_with_speaker_embedding_end(self, speech_server):
+        """Steering params travel as flat keys, outside voice_clone_prompt."""
+        req = OpenAICreateSpeechRequest(
+            input="Hello",
+            task_type="Base",
+            speaker_embedding=[0.1] * 1024,
+            speaker_embedding_end=[0.2] * 1024,
+            speaker_steering_frames=36,
+        )
+        params = speech_server._build_tts_params(req)
+        assert "ref_spk_embedding_end" not in params["voice_clone_prompt"][0]
+        assert params["speaker_embedding_end"] == [[0.2] * 1024]
+        assert params["speaker_steering_frames"] == [36]
+
+    def test_build_tts_params_without_speaker_embedding_end(self, speech_server):
+        req = OpenAICreateSpeechRequest(input="Hello", task_type="Base", speaker_embedding=[0.1] * 1024)
+        params = speech_server._build_tts_params(req)
+        assert "speaker_embedding_end" not in params
+        assert "speaker_steering_frames" not in params
+
     def test_build_tts_params(self, speech_server):
         """Test TTS parameter building."""
         req = OpenAICreateSpeechRequest(input="Hello", voice="Ryan", language="English")

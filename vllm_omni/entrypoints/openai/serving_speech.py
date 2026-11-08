@@ -1360,6 +1360,14 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             dim_err = self._validate_qwen_tts_speaker_embedding_dim(emb_len)
             if dim_err is not None:
                 return dim_err
+        if request.speaker_embedding_end is not None:
+            if task_type == "VoiceDesign":
+                return "'speaker_embedding_end' is not supported for VoiceDesign task (no speaker to steer from)"
+            if not request.speaker_embedding_end:
+                return "'speaker_embedding_end' must be a non-empty list of floats"
+            dim_err = self._validate_qwen_tts_speaker_embedding_dim(len(request.speaker_embedding_end))
+            if dim_err is not None:
+                return dim_err.replace("speaker_embedding", "speaker_embedding_end", 1)
         # Validate Base task requirements
         if task_type == "Base":
             if request.voice is None:
@@ -1798,6 +1806,13 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             params["x_vector_only_mode"] = [True]
         elif request.x_vector_only_mode is not None and "voice_clone_prompt" not in params:
             params["x_vector_only_mode"] = [request.x_vector_only_mode]
+        # HT: dynamic speaker steering. Kept out of voice_clone_prompt so uploaded
+        # voices still hit the speaker cache; the talker computes the delta from
+        # whatever start speaker embedding it resolves.
+        if request.speaker_embedding_end is not None:
+            params["speaker_embedding_end"] = [list(request.speaker_embedding_end)]
+            if request.speaker_steering_frames is not None:
+                params["speaker_steering_frames"] = [request.speaker_steering_frames]
 
         # Generation parameters
         if request.max_new_tokens is not None:

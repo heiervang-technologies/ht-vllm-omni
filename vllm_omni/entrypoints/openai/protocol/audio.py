@@ -2,7 +2,7 @@ import math
 from typing import Any, Literal
 
 import numpy as np
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 _MAX_EMBEDDING_DIM = 8192
 
@@ -65,6 +65,21 @@ class OpenAICreateSpeechRequest(BaseModel):
         "2048-dim for 1.7B). Skips speaker encoder extraction from ref_audio. "
         "Implies x_vector_only_mode=True. Mutually exclusive with ref_audio.",
     )
+    speaker_embedding_end: list[float] | None = Field(
+        default=None,
+        max_length=_MAX_EMBEDDING_DIM,
+        description="Target speaker embedding for dynamic voice steering. The voice "
+        "drifts linearly from the request's speaker (speaker_embedding, an uploaded "
+        "voice, ref_audio or a built-in CustomVoice speaker) towards this embedding "
+        "over speaker_steering_frames codec frames.",
+    )
+    speaker_steering_frames: int | None = Field(
+        default=None,
+        ge=1,
+        description="Number of codec frames over which speaker_embedding_end is "
+        "blended in (12 frames = 1 s for the 12Hz models). Defaults to an estimate "
+        "of the utterance length derived from the input text.",
+    )
     max_new_tokens: int | None = Field(
         default=None,
         description="Maximum tokens to generate",
@@ -93,11 +108,11 @@ class OpenAICreateSpeechRequest(BaseModel):
             raise ValueError("'sse' is not a supported stream_format yet. Please use 'audio'.")
         return v
 
-    @field_validator("speaker_embedding")
+    @field_validator("speaker_embedding", "speaker_embedding_end")
     @classmethod
-    def validate_speaker_embedding(cls, v: list[float] | None) -> list[float] | None:
+    def validate_speaker_embedding(cls, v: list[float] | None, info: ValidationInfo) -> list[float] | None:
         if v is not None and not all(math.isfinite(x) for x in v):
-            raise ValueError("'speaker_embedding' values must be finite (no NaN or Inf)")
+            raise ValueError(f"'{info.field_name}' values must be finite (no NaN or Inf)")
         return v
 
     @model_validator(mode="after")
@@ -105,6 +120,14 @@ class OpenAICreateSpeechRequest(BaseModel):
         if self.speaker_embedding is not None:
             if self.ref_audio is not None:
                 raise ValueError("'speaker_embedding' and 'ref_audio' are mutually exclusive")
+        if self.speaker_embedding_end is not None:
+            if self.speaker_embedding is not None and len(self.speaker_embedding_end) != len(self.speaker_embedding):
+                raise ValueError(
+                    "'speaker_embedding' and 'speaker_embedding_end' must have the same dimension "
+                    f"(got {len(self.speaker_embedding)} and {len(self.speaker_embedding_end)})"
+                )
+        elif self.speaker_steering_frames is not None:
+            raise ValueError("'speaker_steering_frames' requires 'speaker_embedding_end'")
         return self
 
     @model_validator(mode="after")
